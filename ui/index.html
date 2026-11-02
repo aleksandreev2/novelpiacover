@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' cover:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <title>Novelpia • Архив обложек</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-icon" aria-hidden="true">▤</span>
+          <div><strong>Novelpia</strong><span>Архив обложек</span></div>
+        </div>
+        <button id="add" class="primary">＋ Добавить новеллу</button>
+        <label class="search"
+          ><span class="sr-only">Найти новеллу</span
+          ><input id="search" type="search" placeholder="Найти в коллекции"
+        /></label>
+        <div class="list-heading">
+          <span>Наблюдение</span><span id="novel-count">0</span>
+        </div>
+        <nav id="novels" aria-label="Список новелл"></nav>
+        <div class="sidebar-bottom">
+          <button id="settings" class="plain">⚙ Настройки</button>
+          <p>Закрытие окна сворачивает<br />приложение в трей.</p>
+        </div>
+      </aside>
+      <main>
+        <header class="toolbar">
+          <div id="monitor-status" class="status-pill">Наблюдение включено</div>
+          <div class="toolbar-actions">
+            <button id="pause" class="plain">Пауза</button
+            ><button id="check-all">Проверить все</button>
+          </div>
+        </header>
+        <div id="recovery" class="notice" hidden>
+          Настройки восстановлены из резервной копии. Архив PNG сохранён.
+        </div>
+        <section id="empty" class="empty">
+          <div class="empty-art" aria-hidden="true">▤</div>
+          <h1>Сохраните историю обложек</h1>
+          <p>
+            Добавьте новеллу — её текущая обложка и новые версии будут
+            сохраняться в выбранную папку.
+          </p>
+          <button id="empty-add" class="primary">Добавить первую новеллу</button
+          ><small>Обычная обложка и оригинал высокого качества</small>
+        </section>
+        <section id="detail" hidden>
+          <div class="detail-heading">
+            <div>
+              <p class="source-label" id="novel-id"></p>
+              <h1 id="title"></h1>
+            </div>
+            <button
+              id="remove"
+              class="icon-button"
+              aria-label="Убрать новеллу из наблюдения"
+              title="Убрать из наблюдения"
+            >
+              ×
+            </button>
+          </div>
+          <div class="overview">
+            <div class="cover-frame">
+              <img id="cover" alt="Текущая обложка" hidden />
+              <div id="no-cover">
+                Обложка появится<br />после успешной проверки
+              </div>
+            </div>
+            <div class="novel-info">
+              <span id="novel-state" class="state-tag">Ожидает проверки</span>
+              <h2>Обложки под наблюдением</h2>
+              <p>
+                Новые версии сохраняются автоматически.<br />Старые остаются в
+                вашем архиве.
+              </p>
+              <dl>
+                <div>
+                  <dt>Последняя проверка</dt>
+                  <dd id="last-check">Ещё не было</dd>
+                </div>
+                <div>
+                  <dt>Следующая проверка</dt>
+                  <dd id="next-check">—</dd>
+                </div>
+                <div>
+                  <dt>Сохранено</dt>
+                  <dd id="saved-count">0 PNG</dd>
+                </div>
+              </dl>
+              <div class="novel-actions">
+                <button id="check-one" class="primary">Проверить сейчас</button
+                ><button id="open-site">Страница новеллы</button>
+              </div>
+              <div id="error" class="error-box" role="status" hidden></div>
+            </div>
+          </div>
+          <div class="history-heading">
+            <h2>История обложек</h2>
+            <span id="history-count"></span>
+          </div>
+          <p id="no-history" class="muted">
+            Здесь появятся сохранённые версии. Уже исчезнувшие обложки сайт не
+            предоставляет.
+          </p>
+          <div id="history" class="history-grid"></div>
+          <button id="more" hidden>Показать ещё</button>
+        </section>
+        <footer>
+          <button id="root" class="path-button" title="Открыть папку архива">
+            Выберите папку архива</button
+          ><span id="interval-label">Каждые 30 минут</span>
+        </footer>
+      </main>
+    </div>
+    <dialog id="add-dialog">
+      <form id="add-form">
+        <div class="dialog-heading">
+          <h2>Добавить новеллу</h2>
+          <button
+            type="button"
+            class="close-dialog icon-button"
+            aria-label="Закрыть"
+          >
+            ×
+          </button>
+        </div>
+        <p class="muted">
+          Вставьте ссылку на страницу Novelpia. Текущие обложки сохранятся
+          сразу.
+        </p>
+        <label
+          >Ссылка на новеллу<input
+            id="novel-url"
+            type="url"
+            required
+            maxlength="2048"
+            value="https://novelpia.com/novel/434103"
+            placeholder="https://novelpia.com/novel/434103"
+        /></label>
+        <div class="folder-box">
+          <span id="add-root">Папка не выбрана</span
+          ><button type="button" id="choose-root">Выбрать папку</button>
+        </div>
+        <p id="add-error" class="form-error" role="alert"></p>
+        <div class="dialog-actions">
+          <button type="button" class="close-dialog">Отмена</button
+          ><button type="submit" class="primary" id="add-submit">
+            Добавить и сохранить
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="settings-dialog">
+      <form id="settings-form">
+        <div class="dialog-heading">
+          <h2>Настройки</h2>
+          <button
+            type="button"
+            class="close-dialog icon-button"
+            aria-label="Закрыть"
+          >
+            ×
+          </button>
+        </div>
+        <label
+          >Интервал проверки, минут<input
+            id="interval"
+            type="number"
+            min="5"
+            max="1440"
+            step="1"
+            required
+        /></label>
+        <p class="field-help">
+          От 5 минут до 24 часов. По умолчанию — 30 минут.
+        </p>
+        <div class="setting-folder">
+          <span id="settings-root"></span
+          ><button type="button" id="change-root">Изменить папку</button>
+        </div>
+        <p class="field-help">
+          Новые файлы будут сохраняться в новую папку. Прежние архивы останутся
+          на месте.
+        </p>
+        <label class="checkbox"
+          ><input id="notifications" type="checkbox" />Уведомлять о новых
+          обложках</label
+        ><label class="checkbox"
+          ><input id="login" type="checkbox" />Запускать вместе с Windows</label
+        >
+        <p class="field-help">
+          Приложение должно быть запущено, а компьютер — включён. После сна
+          проверка продолжится автоматически.
+        </p>
+        <p id="settings-error" class="form-error" role="alert"></p>
+        <div class="dialog-actions">
+          <button type="button" class="close-dialog">Отмена</button
+          ><button type="submit" class="primary">Сохранить</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="remove-dialog">
+      <form id="remove-form">
+        <h2>Прекратить наблюдение?</h2>
+        <p>
+          Сохранённые PNG останутся на диске. Если добавить эту новеллу снова,
+          история восстановится.
+        </p>
+        <div class="dialog-actions">
+          <button type="button" class="close-dialog">Отмена</button
+          ><button type="submit" class="danger">Убрать из списка</button>
+        </div>
+      </form>
+    </dialog>
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+    <script src="app.js"></script>
+  </body>
+</html>
