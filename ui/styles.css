@@ -17,6 +17,9 @@
 .lifecycle.discontinued {
   color: #955524;
 }
+.lifecycle.delayed {
+  color: #946321;
+}
 .lifecycle.ongoing {
   color: #247754;
 }

@@ -9,7 +9,12 @@ async function verifyPackage(directory) {
     !files.some((p) => /^\/(?:\.test-data|tests|\.git)(?:\/|$)/.test(p)),
     "Packaged application contains test/profile/repository data",
   );
-  for (const required of ["/src/main.cjs", "/src/status.cjs", "/ui/app.js"])
+  for (const required of [
+    "/src/main.cjs",
+    "/src/status.cjs",
+    "/src/status-parser.cjs",
+    "/ui/app.js",
+  ])
     assert.ok(files.includes(required), "Missing " + required);
   assert.equal(
     JSON.parse(extractFile(archive, "package.json")).version,

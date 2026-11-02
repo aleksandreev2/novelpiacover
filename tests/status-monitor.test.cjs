@@ -163,6 +163,32 @@ test("failed status commit never emits a toast; successful retry emits once", as
   await s.monitor.check("1");
   assert.equal(s.events.length, 1);
 });
+test("delayed publication is tracked and a return from delayed to ongoing notifies once", async (t) => {
+  const s = await setup(t);
+  await s.monitor.add(url);
+  const fetch = s.monitor.fetchResource;
+  let delayed = true;
+  s.monitor.fetchResource = async (u, options) =>
+    u === url
+      ? Buffer.from(
+          page("ongoing").replace(
+            "<span>PLUS</span>",
+            "<span>PLUS</span>" + (delayed ? "<span>연재지연</span>" : ""),
+          ),
+        )
+      : fetch(u, options);
+  await s.monitor.check("1");
+  assert.equal(s.monitor.snapshot().novels[0].status, "delayed");
+  assert.equal(s.events.length, 1);
+  assert.equal(s.events[0].to, "delayed");
+  await s.monitor.check("1");
+  assert.equal(s.events.length, 1);
+  delayed = false;
+  await s.monitor.check("1");
+  assert.equal(s.events.length, 2);
+  assert.equal(s.events[1].from, "delayed");
+  assert.equal(s.events[1].to, "ongoing");
+});
 test("version 1.0 settings upgrade preserves archive and establishes silent status baseline", async (t) => {
   const s = await setup(t);
   await s.monitor.add(url);

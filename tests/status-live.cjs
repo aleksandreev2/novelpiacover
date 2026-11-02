@@ -19,11 +19,15 @@ const { startApplication } = require("../src/main.cjs");
     notifications: false,
     statusNotifications: {
       enabled: false,
-      targets: ["completed", "discontinued", "ongoing"],
+      targets: ["completed", "discontinued", "delayed", "ongoing"],
       sound: false,
     },
   });
   for (const [id, expected] of [
+    ["363368", "ongoing"],
+    ["418139", "ongoing"],
+    ["439936", "ongoing"],
+    ["391344", "delayed"],
     ["434103", "ongoing"],
     ["211530", "completed"],
     ["330733", "discontinued"],
@@ -41,14 +45,20 @@ const { startApplication } = require("../src/main.cjs");
       }),
     );
   }
-  const before = monitor.snapshot().novels[0].history.length;
+  const before = monitor.snapshot().novels.find((n) => n.id === "434103")
+    .history.length;
   await monitor.check("434103");
-  assert.equal(monitor.snapshot().novels[0].history.length, before);
+  assert.equal(
+    monitor.snapshot().novels.find((n) => n.id === "434103").history.length,
+    before,
+  );
   window.show();
-  window.webContents.send("archive:select", "211530");
-  await new Promise(r=>setTimeout(r,500));
-  const broken=await window.webContents.executeJavaScript('Promise.all([...document.images].filter(i=>i.src&&i.getBoundingClientRect().top<innerHeight).map(async i=>{try{await i.decode();return null;}catch{return i.src;}})).then(items=>items.filter(Boolean))');
-  assert.deepEqual(broken,[],'Visible cover previews must decode');
+  window.webContents.send("archive:select", "391344");
+  await new Promise((r) => setTimeout(r, 500));
+  const broken = await window.webContents.executeJavaScript(
+    "Promise.all([...document.images].filter(i=>i.src&&i.getBoundingClientRect().top<innerHeight).map(async i=>{try{await i.decode();return null;}catch{return i.src;}})).then(items=>items.filter(Boolean))",
+  );
+  assert.deepEqual(broken, [], "Visible cover previews must decode");
   await window.webContents.executeJavaScript(
     "new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(()=>r(true))))",
   );
@@ -67,7 +77,7 @@ const { startApplication } = require("../src/main.cjs");
     (await window.webContents.capturePage()).toPNG(),
   );
   console.log(
-    "LIVE STATUS PASS: all 3 lifecycle states, real cover downloads, no duplicate saves. Screenshots: " +
+    "LIVE STATUS PASS: all 4 lifecycle states, 4 user-reported titles, real cover previews, no duplicate saves. Screenshots: " +
       base,
   );
   await shutdown();

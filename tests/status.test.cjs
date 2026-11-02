@@ -63,14 +63,14 @@ test("ambiguous, incomplete or new lifecycle markup preserves unknown", () => {
     "unknown",
   );
 });
-test("unrecognised terminal badge wrappers never imply an ongoing title", () => {
-  for (const badges of [
-    "완결",
-    "<b>완결</b>",
-    "<span>PLUS</span>완결",
-    "<span>PLUS</span><strong>연재중단</strong>",
+test("terminal badge wrappers preserve the explicit state and never fabricate resume", () => {
+  for (const [badges, expected] of [
+    ["완결", "completed"],
+    ["<b>완결</b>", "completed"],
+    ["<span>PLUS</span>완결", "completed"],
+    ["<span>PLUS</span><strong>연재중단</strong>", "discontinued"],
   ])
-    assert.equal(extractStatus(page(badges)), "unknown");
+    assert.equal(extractStatus(page(badges)), expected);
 });
 test("validates notification policy shape and accepted destination states", () => {
   assert.deepEqual(

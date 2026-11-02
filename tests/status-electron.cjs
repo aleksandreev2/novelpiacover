@@ -31,7 +31,7 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms));
     notifications: false,
     statusNotifications: {
       enabled: true,
-      targets: ["completed", "discontinued", "ongoing"],
+      targets: ["completed", "discontinued", "delayed", "ongoing"],
       sound: false,
     },
   });
@@ -44,7 +44,7 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms));
     options.kind === "image"
       ? png
       : Buffer.from(
-          `<div class="epnew-novel-title">Status integration test</div><div class="epnew-writer"><p class="in-writer">Author</p><p class="in-badge"><span>PLUS</span>${status === "completed" ? '<span class="b_comp">완결</span>' : ""}</p></div><a href="//images.novelpia.com/imagebox/cover/test.file"><img class="cover_img" src="//images.novelpia.com/imagebox/cover/test.file"></a>`,
+          `<div class="epnew-novel-title">Status integration test</div><div class="epnew-writer"><p class="in-writer">Author</p><p class="in-badge"><span>PLUS</span>${status === "completed" ? '<span class="b_comp">완결</span>' : status === "delayed" ? "<span>연재지연</span>" : ""}</p></div><a href="//images.novelpia.com/imagebox/cover/test.file"><img class="cover_img" src="//images.novelpia.com/imagebox/cover/test.file"></a>`,
         );
   if (monitor.snapshot().novels.some((n) => n.id === "1"))
     await monitor.remove("1");
@@ -65,7 +65,14 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms));
   await delay(150);
   assert.deepEqual(
     monitor.snapshot().novels.find((n) => n.id === "1").statusNotifications,
-    { enabled: true, targets: ["completed", "ongoing"] },
+    { enabled: true, targets: ["completed", "delayed", "ongoing"] },
+  );
+  status = "delayed";
+  await monitor.check("1");
+  await delay(100);
+  assert.equal(
+    await ui('document.getElementById("title-status").textContent'),
+    "Выпуск задерживается",
   );
   status = "completed";
   await monitor.check("1");
@@ -77,7 +84,7 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms));
   assert.ok(
     (
       await ui('document.getElementById("status-history").textContent')
-    ).includes("Продолжается → Завершён"),
+    ).includes("Выпуск задерживается → Завершён"),
   );
   await ui('document.getElementById("settings").click()');
   assert.equal(

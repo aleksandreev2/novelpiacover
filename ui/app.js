@@ -9,7 +9,7 @@ let state,
   statusLimit = 10,
   policyTitleId = null,
   removeTitleId = null;
-const statuses = ["completed", "discontinued", "ongoing"];
+const statuses = ["completed", "discontinued", "delayed", "ongoing"];
 function readPolicy(prefix, includeSound = false) {
   return {
     enabled: $(prefix + "-enabled").checked,
@@ -146,7 +146,10 @@ function render() {
   $("title-status").title = n.statusObservedAt
     ? "Проверен: " + date(n.statusObservedAt)
     : "Появится после успешного чтения статуса";
-  $("status-read-warning").hidden = !(n.statusAvailable === false && n.status);
+  $("status-read-warning").hidden = n.statusAvailable !== false;
+  $("status-read-warning").textContent =
+    (n.status ? "Показан последний известный статус. " : "") +
+    (n.statusReason || "Сейчас не удалось прочитать статус страницы.");
   const changes = [...(n.statusHistory || [])].reverse();
   $("status-history-summary").textContent =
     `История статусов${changes.length ? " (" + changes.length + ")" : ""}`;

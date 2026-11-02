@@ -21,6 +21,7 @@ function defaults() {
     login: false,
     notifications: true,
     statusNotifications: defaultPolicy(),
+    statusPolicyVersion: 2,
     novels: [],
     retired: {},
   };
@@ -39,6 +40,22 @@ class Store {
         const s = JSON.parse(await fs.readFile(candidate, "utf8"));
         if (s.version !== 1 || !Array.isArray(s.novels) || !s.retired)
           throw new Error("Неподдерживаемые настройки.");
+        if ((s.statusPolicyVersion || 1) < 2) {
+          const legacy = ["completed", "discontinued", "ongoing"];
+          const migrate = (policy) =>
+            policy &&
+            Array.isArray(policy.targets) &&
+            policy.targets.length === legacy.length &&
+            legacy.every((status) => policy.targets.includes(status))
+              ? { ...policy, targets: [...policy.targets, "delayed"] }
+              : policy;
+          if (s.statusNotifications)
+            s.statusNotifications = migrate(s.statusNotifications);
+          for (const novel of [...s.novels, ...Object.values(s.retired)])
+            if (novel?.statusNotifications)
+              novel.statusNotifications = migrate(novel.statusNotifications);
+          s.statusPolicyVersion = 2;
+        }
         return new Store(directory, { ...defaults(), ...s }, i === 1);
       } catch (e) {
         if (

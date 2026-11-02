@@ -3,7 +3,7 @@ const { EventEmitter } = require("node:events");
 const { parseNovelUrl, extractNovel, safeFolder } = require("./novelpia.cjs");
 const {
   STATUS_LABELS,
-  extractStatus,
+  inspectStatus,
   validatePolicy,
   observeStatus,
   shouldNotify,
@@ -169,7 +169,9 @@ class Monitor extends EventEmitter {
       const page = (
         await this.fetchResource(novel.url, { kind: "page" })
       ).toString("utf8");
-      statusChange = observeStatus(novel, extractStatus(page));
+      const inspected = inspectStatus(page);
+      novel.statusReason = inspected.reason;
+      statusChange = observeStatus(novel, inspected.status);
       const data = extractNovel(page, novel.url);
       novel.title = data.title;
       if (statusChange) statusChange.title = novel.title;
