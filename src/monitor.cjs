@@ -1,6 +1,13 @@
 "use strict";
 const { EventEmitter } = require("node:events");
 const { parseNovelUrl, extractNovel, safeFolder } = require("./novelpia.cjs");
+const {
+  STATUS_LABELS,
+  extractStatus,
+  validatePolicy,
+  observeStatus,
+  shouldNotify,
+} = require("./status.cjs");
 class Monitor extends EventEmitter {
   constructor({ store, archive, fetchResource, decode }) {
     super();
@@ -15,6 +22,7 @@ class Monitor extends EventEmitter {
       ...structuredClone(this.store.state),
       busy: [...this.busy],
       recovered: this.store.recovered,
+      statusLabels: STATUS_LABELS,
     };
   }
   changed() {
@@ -58,7 +66,14 @@ class Monitor extends EventEmitter {
     return this.enqueue(async () => {
       if (!patch || typeof patch !== "object" || Array.isArray(patch))
         throw new Error("Неверные настройки.");
-      const allowed = ["root", "interval", "paused", "notifications", "login"];
+      const allowed = [
+        "root",
+        "interval",
+        "paused",
+        "notifications",
+        "login",
+        "statusNotifications",
+      ];
       if (Object.keys(patch).some((k) => !allowed.includes(k)))
         throw new Error("Неизвестная настройка.");
       if (
@@ -73,6 +88,11 @@ class Monitor extends EventEmitter {
           throw new Error("Неверное значение настройки.");
       if ("root" in patch && typeof patch.root !== "string")
         throw new Error("Неверная папка.");
+      if ("statusNotifications" in patch)
+        patch = {
+          ...patch,
+          statusNotifications: validatePolicy(patch.statusNotifications),
+        };
       await this.store.update((s) => {
         Object.assign(s, patch);
         if ("interval" in patch)
@@ -92,6 +112,19 @@ class Monitor extends EventEmitter {
         const n = s.novels.find((n) => n.id === id);
         if (n) s.retired[id] = n;
         s.novels = s.novels.filter((n) => n.id !== id);
+      });
+      this.changed();
+      return this.snapshot();
+    });
+  }
+  async setNovelNotifications(id, policy) {
+    const validated =
+      policy === null ? null : validatePolicy(policy, { allowSound: false });
+    return this.enqueue(async () => {
+      if (!this.store.state.novels.some((n) => n.id === id))
+        throw new Error("Новелла не найдена.");
+      await this.store.update((s) => {
+        s.novels.find((n) => n.id === id).statusNotifications = validated;
       });
       this.changed();
       return this.snapshot();
@@ -128,17 +161,18 @@ class Monitor extends EventEmitter {
       errors = [],
       newCount = 0,
       retryAfter = 0,
-      currentHash;
+      currentHash,
+      statusChange;
     this.busy.add(id);
     this.changed();
     try {
-      const data = extractNovel(
-        (await this.fetchResource(novel.url, { kind: "page" })).toString(
-          "utf8",
-        ),
-        novel.url,
-      );
+      const page = (
+        await this.fetchResource(novel.url, { kind: "page" })
+      ).toString("utf8");
+      statusChange = observeStatus(novel, extractStatus(page));
+      const data = extractNovel(page, novel.url);
       novel.title = data.title;
+      if (statusChange) statusChange.title = novel.title;
       novel.folder ||= safeFolder(novel.title, id);
       novel.sources = data.sources;
       // Commit the stable location before any PNG can outlive this check.
@@ -209,6 +243,15 @@ class Monitor extends EventEmitter {
         const i = s.novels.findIndex((n) => n.id === id);
         if (i >= 0) s.novels[i] = novel;
       });
+      if (
+        statusChange &&
+        shouldNotify(
+          this.store.state.statusNotifications,
+          novel.statusNotifications,
+          statusChange.to,
+        )
+      )
+        this.emit("status-changed", statusChange);
       if (newCount)
         this.emit("saved", { id, title: novel.title, count: newCount });
       return this.snapshot();

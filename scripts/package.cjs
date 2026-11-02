@@ -1,5 +1,6 @@
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
+const { version } = require("../package.json");
 (async () => {
   const entry = require.resolve("@electron/packager", {
     paths: [process.env.NOVELPIA_BUILD_DEPS || process.cwd(), __dirname],
@@ -14,17 +15,18 @@ const { pathToFileURL } = require("node:url");
     electronVersion: "45.2.1",
     name: "NovelpiaCoverArchive",
     icon: path.resolve(__dirname, "../assets/icon.ico"),
-    appVersion: "1.0.0",
-    buildVersion: "1.0.0",
+    appVersion: version,
+    buildVersion: version,
     overwrite: true,
     prune: true,
-    asar: {unpack: '**/*.{node,dll}'},
+    asar: { unpack: "**/*.{node,dll}" },
     ignore: [
       /^\/tests($|\/)/,
       /^\/docs($|\/)/,
       /^\/scripts($|\/)/,
       /^\/release($|\/)/,
       /^\/\.git/,
+      /^\/\.test-data($|\/)/,
     ],
     win32metadata: {
       CompanyName: "Novelpia Cover Archive",
@@ -33,6 +35,8 @@ const { pathToFileURL } = require("node:url");
       InternalName: "NovelpiaCoverArchive",
     },
   });
+  for (const directory of results)
+    await require("./verify-package.cjs").verifyPackage(directory);
   console.log(results.join("\n"));
 })().catch((e) => {
   console.error(e);

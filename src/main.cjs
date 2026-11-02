@@ -11,7 +11,6 @@ const {
   protocol,
   Notification,
   powerMonitor,
-  nativeImage,
 } = require("electron");
 const fs = require("node:fs/promises");
 const path = require("node:path");
@@ -20,7 +19,8 @@ const { Store, atomicWrite } = require("./store.cjs");
 const { Archive } = require("./archive.cjs");
 const { Monitor } = require("./monitor.cjs");
 const { fetchResource } = require("./http.cjs");
-const { decodeImage, makeIcon } = require("./images.cjs");
+const { decodeImage, makeIcon, createPreview } = require("./images.cjs");
+const { buildStatusToast } = require("./status.cjs");
 protocol.registerSchemesAsPrivileged([
   {
     scheme: "cover",
@@ -42,9 +42,16 @@ async function startApplication({ show = true, autoStart = true } = {}) {
   const uiPath = path.join(__dirname, "../ui/index.html");
   let quitting = false,
     window,
-    timer;
-  const snapshot = () => ({ ...monitor.snapshot(), canLogin: app.isPackaged });
+    timer,
+    notificationWarning = "";
+  const snapshot = () => ({
+    ...monitor.snapshot(),
+    canLogin: app.isPackaged,
+    notificationWarning,
+    appVersion: require("../package.json").version,
+  });
   const cache = path.join(app.getPath("userData"), "previews");
+  let previewQueue = Promise.resolve();
   await fs.mkdir(cache, { recursive: true });
   const getEntry = (id, hash) => {
     if (typeof id !== "string" || typeof hash !== "string")
@@ -65,13 +72,20 @@ async function startApplication({ show = true, autoStart = true } = {}) {
       try {
         bytes = await fs.readFile(file);
       } catch {
-        const image = nativeImage.createFromPath(entry.file);
-        if (image.isEmpty()) return new Response("", { status: 404 });
-        const size = image.getSize();
-        bytes = image
-          .resize({ width: Math.min(size.width, 560), quality: "good" })
-          .toJPEG(85);
-        await atomicWrite(file, bytes);
+        const pending = previewQueue.then(async () => {
+          try {
+            return await fs.readFile(file);
+          } catch {
+            const preview = await createPreview(entry.file);
+            await atomicWrite(file, preview);
+            return preview;
+          }
+        });
+        previewQueue = pending.then(
+          () => undefined,
+          () => undefined,
+        );
+        bytes = await pending;
       }
       return new Response(bytes, {
         headers: {
@@ -125,6 +139,36 @@ async function startApplication({ show = true, autoStart = true } = {}) {
     if (!window.isDestroyed())
       window.webContents.send("archive:error", e.message);
   };
+  const activeNotifications = new Set();
+  const showNative = (options, novelId) => {
+    if (!Notification.isSupported())
+      throw new Error("Windows-уведомления недоступны в этой системе.");
+    const notification = new Notification({ ...options, icon });
+    activeNotifications.add(notification);
+    notification.on("show", () => {
+      if (notificationWarning) {
+        notificationWarning = "";
+        if (!window.isDestroyed())
+          window.webContents.send("archive:changed", snapshot());
+      }
+    });
+    notification.on("close", () => activeNotifications.delete(notification));
+    notification.on("failed", (_event, error) => {
+      activeNotifications.delete(notification);
+      notificationWarning =
+        "Windows не показала уведомление. Проверьте разрешение уведомлений и режим «Не беспокоить». " +
+        (error || "");
+      report(new Error(notificationWarning));
+      if (!window.isDestroyed())
+        window.webContents.send("archive:changed", snapshot());
+    });
+    notification.on("click", () => {
+      reveal();
+      if (novelId && store.state.novels.some((n) => n.id === novelId))
+        window.webContents.send("archive:select", novelId);
+    });
+    notification.show();
+  };
   const tray = new Tray(icon);
   tray.setToolTip("Novelpia • Архив обложек");
   const trayMenu = () =>
@@ -156,12 +200,24 @@ async function startApplication({ show = true, autoStart = true } = {}) {
   });
   monitor.on("saved", (event) => {
     if (store.state.notifications && Notification.isSupported())
-      new Notification({
-        title: "Сохранены новые обложки",
-        body: `${event.title}: ${event.count}`,
-        icon,
-        silent: true,
-      }).show();
+      showNative(
+        {
+          title: "Сохранены новые обложки",
+          body: `${event.title}: ${event.count}`,
+          silent: true,
+        },
+        event.id,
+      );
+  });
+  monitor.on("status-changed", (event) => {
+    try {
+      showNative(
+        buildStatusToast(event, store.state.statusNotifications.sound),
+        event.novelId,
+      );
+    } catch (e) {
+      report(e);
+    }
   });
   ipcMain.handle("archive:action", async (event, action, payload) => {
     try {
@@ -209,12 +265,39 @@ async function startApplication({ show = true, autoStart = true } = {}) {
           value = snapshot();
           break;
         }
+        case "novel-notifications":
+          if (
+            !payload ||
+            typeof payload.id !== "string" ||
+            !("policy" in payload)
+          )
+            throw new Error("Неверные настройки тайтла.");
+          await monitor.setNovelNotifications(payload.id, payload.policy);
+          value = snapshot();
+          break;
+        case "test-notification":
+          showNative({
+            title: "Novelpia: проверка уведомлений",
+            body: "Уведомления об изменениях статуса тайтлов будут появляться здесь.",
+            silent: !store.state.statusNotifications.sound,
+          });
+          value = { requested: true };
+          break;
+        case "open-notification-settings":
+          await shell.openExternal("ms-settings:notifications");
+          break;
         case "settings": {
           if (
             !payload ||
             Object.keys(payload).some(
               (k) =>
-                !["interval", "paused", "notifications", "login"].includes(k),
+                ![
+                  "interval",
+                  "paused",
+                  "notifications",
+                  "login",
+                  "statusNotifications",
+                ].includes(k),
             )
           )
             throw new Error("Недопустимая настройка.");
@@ -288,6 +371,8 @@ async function startApplication({ show = true, autoStart = true } = {}) {
     ipcMain.removeHandler("archive:action");
     protocol.unhandle("cover");
     tray.destroy();
+    for (const notification of activeNotifications) notification.close();
+    activeNotifications.clear();
     if (!window.isDestroyed()) window.destroy();
   };
   app.on("before-quit", (event) => {

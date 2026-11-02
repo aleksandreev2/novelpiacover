@@ -3,7 +3,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const assert = require("node:assert/strict");
 const { startApplication } = require("../src/main.cjs");
-const base = path.resolve(__dirname, "../../../work/electron-smoke");
+const base = path.resolve(__dirname, "../.test-data/electron-smoke");
 app.setPath("userData", path.join(base, "profile"));
 (async () => {
   await app.whenReady();
@@ -83,7 +83,9 @@ app.setPath("userData", path.join(base, "profile"));
     );
     assert.ok(rendered.cards >= 1, JSON.stringify(rendered));
   }
-  await window.webContents.executeJavaScript('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(()=>r(true))))');
+  await window.webContents.executeJavaScript(
+    "new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(()=>r(true))))",
+  );
   await fs.mkdir(base, { recursive: true });
   await fs.writeFile(
     path.join(base, "preview.png"),

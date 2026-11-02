@@ -5,7 +5,24 @@ let state,
   selected = null,
   limit = 24,
   toastTimer,
-  working = false;
+  working = false,
+  statusLimit = 10,
+  policyTitleId = null,
+  removeTitleId = null;
+const statuses = ["completed", "discontinued", "ongoing"];
+function readPolicy(prefix, includeSound = false) {
+  return {
+    enabled: $(prefix + "-enabled").checked,
+    targets: statuses.filter((status) => $(prefix + "-" + status).checked),
+    ...(includeSound ? { sound: $(prefix + "-sound").checked } : {}),
+  };
+}
+function fillPolicy(prefix, policy) {
+  $(prefix + "-enabled").checked = policy.enabled;
+  for (const status of statuses)
+    $(prefix + "-" + status).checked = policy.targets.includes(status);
+  if (prefix === "status") $("status-sound").checked = policy.sound;
+}
 const date = (value) =>
   value
     ? new Date(value).toLocaleString("ru-RU", {
@@ -54,11 +71,13 @@ function render() {
     limit = 24;
   }
   $("recovery").hidden = !state.recovered;
+  $("notification-warning").hidden = !state.notificationWarning;
+  $("notification-warning").textContent = state.notificationWarning || "";
   $("novel-count").textContent = state.novels.length;
   $("monitor-status").textContent = state.paused
     ? "Наблюдение на паузе"
     : state.busy.length
-      ? "Проверяем обложки…"
+      ? "Проверяем тайтлы…"
       : "Наблюдение включено";
   $("monitor-status").classList.toggle("paused", state.paused);
   $("pause").textContent = state.paused ? "Продолжить" : "Пауза";
@@ -67,7 +86,8 @@ function render() {
     ? `▱  ${state.root}`
     : "▱  Выберите папку архива";
   $("root").title = state.root || "Выбрать папку архива";
-  $("interval-label").textContent = `Интервал: ${state.interval} мин`;
+  $("interval-label").textContent =
+    `v${state.appVersion} · Интервал: ${state.interval} мин`;
   $("add-root").textContent = state.root || "Папка не выбрана";
   $("settings-root").textContent = state.root || "Папка не выбрана";
   const query = $("search").value.trim().toLowerCase();
@@ -96,13 +116,14 @@ function render() {
           ? "Проверка…"
           : n.error
             ? "Нужна повторная проверка"
-            : `${n.history.length} PNG в архиве`,
+            : `${state.statusLabels[n.status] || state.statusLabels.unknown} · ${n.history.length} PNG`,
       ),
     );
     row.append(preview, info);
     row.onclick = () => {
       selected = n.id;
       limit = 24;
+      statusLimit = 10;
       render();
     };
     $("novels").append(row);
@@ -119,6 +140,35 @@ function render() {
   if (!n) return;
   $("title").textContent = n.title;
   $("novel-id").textContent = `novelpia.com / novel / ${n.id}`;
+  $("title-status").textContent =
+    state.statusLabels[n.status] || state.statusLabels.unknown;
+  $("title-status").className = "lifecycle " + (n.status || "unknown");
+  $("title-status").title = n.statusObservedAt
+    ? "Проверен: " + date(n.statusObservedAt)
+    : "Появится после успешного чтения статуса";
+  $("status-read-warning").hidden = !(n.statusAvailable === false && n.status);
+  const changes = [...(n.statusHistory || [])].reverse();
+  $("status-history-summary").textContent =
+    `История статусов${changes.length ? " (" + changes.length + ")" : ""}`;
+  $("status-baseline").textContent = changes.length
+    ? "Время — момент обнаружения изменения."
+    : n.status
+      ? "Текущий статус принят за исходный. Оповестим при следующем изменении."
+      : "Статус появится после успешной проверки страницы.";
+  $("status-history").replaceChildren();
+  for (const change of changes.slice(0, statusLimit)) {
+    const row = item("li");
+    row.append(
+      item(
+        "span",
+        "status-transition",
+        `${state.statusLabels[change.from]} → ${state.statusLabels[change.to]}`,
+      ),
+      item("time", "status-time", date(change.at)),
+    );
+    $("status-history").append(row);
+  }
+  $("status-more").hidden = changes.length <= statusLimit;
   const busy = state.busy.includes(n.id);
   $("novel-state").textContent = busy
     ? "Проверяем…"
@@ -218,6 +268,7 @@ $("open-site").onclick = () =>
 $("settings").onclick = () => {
   $("interval").value = state.interval;
   $("notifications").checked = state.notifications;
+  fillPolicy("status", state.statusNotifications);
   $("login").checked = state.login;
   $("login").disabled = !state.canLogin;
   $("settings-error").textContent = "";
@@ -229,6 +280,7 @@ $("settings-form").onsubmit = async (event) => {
     await call("settings", {
       interval: Number($("interval").value),
       notifications: $("notifications").checked,
+      statusNotifications: readPolicy("status", true),
       ...(state.canLogin ? { login: $("login").checked } : {}),
     });
     $("settings-dialog").close();
@@ -265,11 +317,56 @@ $("add-form").onsubmit = async (event) => {
 $("add-dialog").addEventListener("cancel", (e) => {
   if (working) e.preventDefault();
 });
-$("remove").onclick = () => $("remove-dialog").showModal();
+$("status-more").onclick = () => {
+  statusLimit += 10;
+  render();
+};
+$("test-notification").onclick = async () => {
+  try {
+    await call("test-notification");
+    toast(
+      "Тестовое уведомление отправлено. Если баннер не появился, проверьте настройки Windows.",
+    );
+  } catch (e) {
+    toast(e.message);
+  }
+};
+$("windows-notifications").onclick = () =>
+  call("open-notification-settings").catch((e) => toast(e.message));
+$("novel-notifications").onclick = () => {
+  const n = current();
+  policyTitleId = n.id;
+  $("policy-title").textContent = n.title;
+  $("policy-error").textContent = "";
+  $("policy-inherit").checked = !n.statusNotifications;
+  fillPolicy("policy", n.statusNotifications || state.statusNotifications);
+  $("policy-fields").disabled = $("policy-inherit").checked;
+  $("novel-notifications-dialog").showModal();
+};
+$("policy-inherit").onchange = () => {
+  $("policy-fields").disabled = $("policy-inherit").checked;
+};
+$("novel-notifications-form").onsubmit = async (event) => {
+  event.preventDefault();
+  try {
+    await call("novel-notifications", {
+      id: policyTitleId,
+      policy: $("policy-inherit").checked ? null : readPolicy("policy"),
+    });
+    $("novel-notifications-dialog").close();
+    toast("Настройки тайтла сохранены");
+  } catch (e) {
+    $("policy-error").textContent = e.message;
+  }
+};
+$("remove").onclick = () => {
+  removeTitleId = selected;
+  $("remove-dialog").showModal();
+};
 $("remove-form").onsubmit = async (event) => {
   event.preventDefault();
   try {
-    await call("remove", selected);
+    await call("remove", removeTitleId);
     $("remove-dialog").close();
     toast("Наблюдение остановлено. Файлы сохранены.");
   } catch (e) {
@@ -281,4 +378,13 @@ api.subscribe((value) => {
   render();
 });
 api.subscribeErrors(toast);
+api.subscribeSelection((id) => {
+  if (state?.novels.some((n) => n.id === id)) {
+    selected = id;
+    limit = 24;
+    statusLimit = 10;
+    render();
+    window.scrollTo({ top: 0, behavior: "instant" });
+  }
+});
 call("snapshot").catch((e) => toast(e.message));

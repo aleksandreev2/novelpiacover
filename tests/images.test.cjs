@@ -30,3 +30,28 @@ test("rejects HTML masquerading as image data", async () => {
     /Не удалось прочитать/,
   );
 });
+test("creates a valid preview from archive paths longer than Windows MAX_PATH", async (t) => {
+  const fs = require("node:fs/promises"),
+    path = require("node:path"),
+    { temporary } = require("./helpers.cjs");
+  const directory = path.join(
+    await temporary(t),
+    "a".repeat(120),
+    "b".repeat(100),
+  );
+  await fs.mkdir(directory, { recursive: true });
+  const file = path.join(directory, "cover.png");
+  assert.ok(file.length > 260);
+  await fs.writeFile(
+    file,
+    Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==",
+      "base64",
+    ),
+  );
+  const preview = await require("../src/images.cjs").createPreview(file);
+  assert.equal(preview.subarray(0, 3).toString("hex"), "ffd8ff");
+  const metadata = await require("sharp")(preview).metadata();
+  assert.equal(metadata.width, 1);
+  assert.equal(metadata.height, 1);
+});

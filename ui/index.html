@@ -7,7 +7,7 @@
       http-equiv="Content-Security-Policy"
       content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' cover:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
     />
-    <title>Novelpia • Архив обложек</title>
+    <title>Novelpia • Обложки и статусы</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -15,7 +15,7 @@
       <aside class="sidebar">
         <div class="brand">
           <span class="brand-icon" aria-hidden="true">▤</span>
-          <div><strong>Novelpia</strong><span>Архив обложек</span></div>
+          <div><strong>Novelpia</strong><span>Обложки и статусы</span></div>
         </div>
         <button id="add" class="primary">＋ Добавить новеллу</button>
         <label class="search"
@@ -42,6 +42,12 @@
         <div id="recovery" class="notice" hidden>
           Настройки восстановлены из резервной копии. Архив PNG сохранён.
         </div>
+        <div
+          id="notification-warning"
+          class="notice"
+          role="status"
+          hidden
+        ></div>
         <section id="empty" class="empty">
           <div class="empty-art" aria-hidden="true">▤</div>
           <h1>Сохраните историю обложек</h1>
@@ -83,6 +89,10 @@
               </p>
               <dl>
                 <div>
+                  <dt>Статус тайтла</dt>
+                  <dd id="title-status">Не определён</dd>
+                </div>
+                <div>
                   <dt>Последняя проверка</dt>
                   <dd id="last-check">Ещё не было</dd>
                 </div>
@@ -97,11 +107,22 @@
               </dl>
               <div class="novel-actions">
                 <button id="check-one" class="primary">Проверить сейчас</button
-                ><button id="open-site">Страница новеллы</button>
+                ><button id="open-site">Страница новеллы</button
+                ><button id="novel-notifications">Уведомления…</button>
               </div>
+              <p id="status-read-warning" class="field-help" hidden>
+                Сейчас статус не распознан. Показан последний известный;
+                оповещения о переходе не отправляются.
+              </p>
               <div id="error" class="error-box" role="status" hidden></div>
             </div>
           </div>
+          <details id="status-history-panel" class="status-history">
+            <summary id="status-history-summary">История статусов</summary>
+            <p id="status-baseline" class="field-help"></p>
+            <ol id="status-history"></ol>
+            <button id="status-more" hidden>Показать ещё</button>
+          </details>
           <div class="history-heading">
             <h2>История обложек</h2>
             <span id="history-count"></span>
@@ -193,7 +214,45 @@
         <label class="checkbox"
           ><input id="notifications" type="checkbox" />Уведомлять о новых
           обложках</label
-        ><label class="checkbox"
+        >
+        <fieldset class="notification-group">
+          <legend>Статусы тайтлов</legend>
+          <label class="checkbox"
+            ><input id="status-enabled" type="checkbox" />По умолчанию оповещать
+            об изменениях</label
+          >
+          <p class="field-help">Оповещать при переходе в выбранный статус:</p>
+          <div class="status-targets">
+            <label class="checkbox"
+              ><input id="status-completed" type="checkbox" />Завершён</label
+            ><label class="checkbox"
+              ><input id="status-discontinued" type="checkbox" />Выпуск
+              остановлен</label
+            ><label class="checkbox"
+              ><input id="status-ongoing" type="checkbox" />Снова
+              продолжается</label
+            >
+          </div>
+          <label class="checkbox"
+            ><input id="status-sound" type="checkbox" />Со звуком</label
+          >
+          <p class="field-help">
+            Для отдельного тайтла можно задать свои правила. Первое чтение
+            статуса не вызывает оповещение.
+          </p>
+          <div class="notification-tools">
+            <button id="test-notification" type="button">
+              Проверить уведомление</button
+            ><button id="windows-notifications" type="button" class="plain">
+              Настройки Windows
+            </button>
+          </div>
+          <p class="field-help">
+            Баннеры могут быть скрыты режимом «Не беспокоить» и настройками
+            Windows.
+          </p>
+        </fieldset>
+        <label class="checkbox"
           ><input id="login" type="checkbox" />Запускать вместе с Windows</label
         >
         <p class="field-help">
@@ -201,6 +260,51 @@
           проверка продолжится автоматически.
         </p>
         <p id="settings-error" class="form-error" role="alert"></p>
+        <div class="dialog-actions">
+          <button type="button" class="close-dialog">Отмена</button
+          ><button type="submit" class="primary">Сохранить</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="novel-notifications-dialog">
+      <form id="novel-notifications-form">
+        <div class="dialog-heading">
+          <h2>Уведомления тайтла</h2>
+          <button
+            type="button"
+            class="close-dialog icon-button"
+            aria-label="Закрыть"
+          >
+            ×
+          </button>
+        </div>
+        <p id="policy-title" class="muted"></p>
+        <label class="checkbox"
+          ><input id="policy-inherit" type="checkbox" />Использовать общие
+          настройки</label
+        >
+        <fieldset id="policy-fields" class="notification-group">
+          <legend>Собственные правила</legend>
+          <label class="checkbox"
+            ><input id="policy-enabled" type="checkbox" />Оповещать об
+            изменениях статуса</label
+          >
+          <p class="field-help">Оповещать при переходе в статус:</p>
+          <label class="checkbox"
+            ><input id="policy-completed" type="checkbox" />Завершён</label
+          ><label class="checkbox"
+            ><input id="policy-discontinued" type="checkbox" />Выпуск
+            остановлен</label
+          ><label class="checkbox"
+            ><input id="policy-ongoing" type="checkbox" />Снова
+            продолжается</label
+          >
+        </fieldset>
+        <p class="field-help">
+          Звук задаётся в общих настройках. История изменений сохраняется и при
+          выключенных оповещениях.
+        </p>
+        <p id="policy-error" class="form-error" role="alert"></p>
         <div class="dialog-actions">
           <button type="button" class="close-dialog">Отмена</button
           ><button type="submit" class="primary">Сохранить</button>

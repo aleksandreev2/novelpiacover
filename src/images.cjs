@@ -1,5 +1,6 @@
 "use strict";
 const sharp = require("sharp");
+const fs = require("node:fs/promises");
 sharp.cache({ memory: 16, files: 0, items: 16 });
 sharp.concurrency(1);
 async function decodeImage(bytes) {
@@ -54,4 +55,18 @@ function makeIcon() {
     scaleFactor: 1,
   });
 }
-module.exports = { decodeImage, makeIcon };
+async function createPreview(file) {
+  // Node's filesystem reader handles long Windows paths; nativeImage paths do not.
+  const bytes = await fs.readFile(file);
+  return sharp(bytes, { limitInputPixels: 40000000, failOn: "error" })
+    .resize({
+      width: 560,
+      height: 840,
+      fit: "inside",
+      withoutEnlargement: true,
+    })
+    .flatten({ background: "#eef2f7" })
+    .jpeg({ quality: 85 })
+    .toBuffer();
+}
+module.exports = { decodeImage, makeIcon, createPreview };

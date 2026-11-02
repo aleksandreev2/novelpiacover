@@ -8,6 +8,91 @@
   --muted: #66778d;
   --line: #dfe6ef;
 }
+.lifecycle {
+  font-weight: 650 !important;
+}
+.lifecycle.completed {
+  color: #2256b2;
+}
+.lifecycle.discontinued {
+  color: #955524;
+}
+.lifecycle.ongoing {
+  color: #247754;
+}
+.status-history {
+  margin-top: 25px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 13px 16px;
+  background: #ffffff80;
+}
+.status-history summary {
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.status-history ol {
+  list-style: none;
+  padding: 0;
+  margin: 10px 0 0;
+}
+.status-history li {
+  display: flex;
+  gap: 18px;
+  justify-content: space-between;
+  border-top: 1px solid var(--line);
+  padding: 10px 0;
+  font-size: 12px;
+}
+.status-time {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.notification-group {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 10px 14px;
+  margin: 22px 0 12px;
+}
+.notification-group legend {
+  font-size: 13px;
+  font-weight: 600;
+  padding: 0 5px;
+}
+.notification-group .checkbox {
+  margin-top: 10px;
+}
+.notification-group:disabled {
+  opacity: 0.55;
+}
+.notification-tools {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+.notification-tools button {
+  font-size: 11px;
+  padding: 8px;
+}
+.status-targets {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px 14px;
+}
+.status-targets .checkbox {
+  font-size: 12px;
+}
+.notification-group .field-help {
+  margin-bottom: 10px;
+}
+dialog {
+  max-height: 90vh;
+  overflow-y: auto;
+}
+#settings-dialog {
+  width: 550px;
+}
 * {
   box-sizing: border-box;
 }

@@ -1,8 +1,12 @@
 {
   "name": "novelpia-cover-archive",
   "productName": "Novelpia Cover Archive",
-  "version": "1.0.0",
-  "description": "Локальный архив обложек Novelpia",
+  "version": "1.1.0",
+  "description": "Архив обложек Novelpia и Windows-уведомления о статусах тайтлов",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aleksandreev2/novelpiacover.git"
+  },
   "author": "Novelpia Cover Archive",
   "license": "MIT",
   "private": true,
@@ -11,9 +15,17 @@
     "start": "electron .",
     "test": "node --test tests/*.test.cjs",
     "smoke": "electron tests/electron-smoke.cjs",
+    "smoke:status": "electron tests/status-electron.cjs",
+    "smoke:live": "electron tests/status-live.cjs",
     "package": "node scripts/package.cjs",
     "installer": "node scripts/installer.cjs"
   },
-  "dependencies": { "sharp": "0.35.5" },
-  "devDependencies": { "electron": "45.2.1", "@electron/packager": "20.3.0", "electron-builder": "26.18.0" }
+  "dependencies": {
+    "sharp": "0.35.5"
+  },
+  "devDependencies": {
+    "electron": "45.2.1",
+    "@electron/packager": "20.3.0",
+    "electron-builder": "26.18.0"
+  }
 }

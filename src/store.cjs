@@ -2,6 +2,7 @@
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { randomUUID } = require("node:crypto");
+const { defaultPolicy } = require("./status.cjs");
 async function atomicWrite(file, data) {
   const tmp = `${file}.${randomUUID()}.tmp`;
   try {
@@ -19,6 +20,7 @@ function defaults() {
     paused: false,
     login: false,
     notifications: true,
+    statusNotifications: defaultPolicy(),
     novels: [],
     retired: {},
   };

@@ -1,7 +1,7 @@
 const fs = require("node:fs/promises");
 const path = require("node:path");
 async function temporary(t) {
-  const base = path.resolve(__dirname, "../../../work/test-data");
+  const base = path.resolve(__dirname, "../.test-data/unit");
   await fs.mkdir(base, { recursive: true });
   const dir = await fs.mkdtemp(path.join(base, "case-"));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
