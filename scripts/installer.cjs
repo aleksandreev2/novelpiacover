@@ -1,13 +1,18 @@
 const path = require("node:path");
+const fs = require("node:fs/promises");
 (async () => {
   const entry = require.resolve("electron-builder", {
     paths: [process.env.NOVELPIA_BUILD_DEPS || process.cwd(), __dirname],
   });
   const { build, Platform } = require(entry);
   const projectDir = path.resolve(__dirname, "..");
-  const prepackaged =
-    process.env.NOVELPIA_PREPACKAGED ||
-    path.join(projectDir, "release/NovelpiaCoverArchive-win32-x64");
+  const prepackaged = path.join(projectDir, "release/rust-windows-x64");
+  const exe = path.join(projectDir, "src-tauri/target/release/NovelpiaCoverArchive.exe");
+  const bootstrap = path.join(projectDir, "assets/WebView2Setup.exe");
+  await fs.access(bootstrap);
+  process.env.NOVELPIA_WEBVIEW_BOOTSTRAP = bootstrap;
+  await fs.mkdir(prepackaged, { recursive: true });
+  await fs.copyFile(exe, path.join(prepackaged, "NovelpiaCoverArchive.exe"));
   const results = await build({
     projectDir,
     prepackaged,
@@ -30,9 +35,11 @@ const path = require("node:path");
         signAndEditExecutable: false,
       },
       nsis: {
+        include: path.join(projectDir, "scripts/installer.nsh"),
         oneClick: true,
         perMachine: false,
         allowElevation: false,
+        packElevateHelper: false,
         createDesktopShortcut: "always",
         createStartMenuShortcut: true,
         shortcutName: "Novelpia — Архив обложек",

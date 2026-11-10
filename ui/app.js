@@ -8,8 +8,16 @@ let state,
   working = false,
   statusLimit = 10,
   policyTitleId = null,
-  removeTitleId = null;
+  removeTitleId = null,
+  view = "collection",
+  pendingSelection,
+  collectionRenderKey = "",
+  activityLimit = 40,
+  activityRenderKey = "";
 const statuses = ["completed", "discontinued", "delayed", "ongoing"];
+const themeMedia = window.matchMedia("(prefers-color-scheme: dark)");
+const titleOrder = new Intl.Collator("ru", { numeric: true, sensitivity: "base" });
+const shortDate = new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "short" });
 function readPolicy(prefix, includeSound = false) {
   return {
     enabled: $(prefix + "-enabled").checked,
@@ -33,6 +41,7 @@ const date = (value) =>
       })
     : "Ещё не было";
 const image = (id, hash) =>
+  api.imageUrl?.(id, hash) ??
   `cover://image/${encodeURIComponent(id)}/${encodeURIComponent(hash)}`;
 function toast(message) {
   $("toast").textContent = message;
@@ -42,11 +51,20 @@ function toast(message) {
 }
 async function call(action, payload) {
   const result = await api.call(action, payload);
-  if (result?.novels) {
-    state = result;
-    render();
-  }
+  if (result?.novels) updateState(result);
   return result;
+}
+function updateState(snapshot) {
+  state = snapshot;
+  if (pendingSelection != null) {
+    const id = pendingSelection;
+    pendingSelection = undefined;
+    if (state.novels.some((n) => n.id === id)) {
+      selectTitle(id);
+      return;
+    }
+  }
+  render();
 }
 function item(tag, className, text) {
   const el = document.createElement(tag);
@@ -57,6 +75,214 @@ function item(tag, className, text) {
 function current() {
   return state?.novels.find((n) => n.id === selected);
 }
+function selectTitle(id) {
+  selected = id;
+  limit = 24;
+  statusLimit = 10;
+  showView("title", "title");
+}
+function showView(next, heading) {
+  view = next;
+  render();
+  window.scrollTo({ top: 0, behavior: "instant" });
+  $(heading).focus({ preventScroll: true });
+}
+function applyTheme() {
+  const theme = state?.theme || "light";
+  document.documentElement.dataset.theme =
+    theme === "dark" || (theme === "system" && themeMedia.matches) ? "dark" : "light";
+}
+function matchesTitle(novel, query) {
+  return `${novel.title} ${novel.id}`.toLocaleLowerCase("ru").includes(query);
+}
+function latestCover(novel) {
+  return novel.history.find((entry) => entry.hash === novel.latestHash) || novel.history.at(-1);
+}
+function changeTimes(novels) {
+  // Older profiles can supply archive and activity records before the host
+  // has populated a dedicated change timestamp.
+  const activityTimes = new Map();
+  for (const event of state.activity || []) {
+    if (!["cover_saved", "status_changed", "title_renamed"].includes(event.type)) continue;
+    const at = Date.parse(event.at) || 0;
+    if (at > (activityTimes.get(event.novelId) || 0)) activityTimes.set(event.novelId, at);
+  }
+  return novels.map((novel) => {
+    let changed = Date.parse(novel.lastChangedAt);
+    if (!Number.isFinite(changed)) {
+      changed = activityTimes.get(novel.id) || 0;
+      for (const entry of novel.history) changed = Math.max(changed, Date.parse(entry.savedAt) || 0);
+      for (const entry of novel.statusHistory || []) changed = Math.max(changed, Date.parse(entry.at) || 0);
+    }
+    return { novel, changed, cover: latestCover(novel) };
+  });
+}
+function collectionCard({ novel, changed, cover }) {
+  const card = item("button", "collection-card");
+  card.type = "button";
+  card.dataset.novelId = novel.id;
+  card.onclick = () => selectTitle(novel.id);
+  const frame = item("span", "collection-cover");
+  const placeholder = item("span", "collection-placeholder");
+  placeholder.setAttribute("aria-hidden", "true");
+  placeholder.append(item("span", "collection-spine"), item("span", "", "Без обложки"));
+  frame.append(placeholder);
+  if (cover) {
+    const preview = item("img");
+    preview.alt = "";
+    preview.loading = "lazy";
+    preview.decoding = "async";
+    preview.src = image(novel.id, cover.hash);
+    preview.onerror = () => { preview.hidden = true; };
+    frame.append(preview);
+  }
+  const body = item("span", "collection-card-body");
+  const title = item("span", "collection-title", novel.title);
+  title.title = novel.title;
+  const status = novel.status || "unknown";
+  const meta = item("span", "collection-meta");
+  meta.append(item("span", `collection-status lifecycle ${status}`, state.statusLabels[status] || state.statusLabels.unknown));
+  if (changed) {
+    const when = new Date(changed);
+    const time = item("time", "collection-time", shortDate.format(when));
+    time.dateTime = when.toISOString();
+    time.title = `Последнее изменение: ${when.toLocaleString("ru-RU")}`;
+    time.setAttribute("aria-label", time.title);
+    meta.append(time);
+  }
+  body.append(title, meta);
+  card.append(frame, body);
+  const row = item("li");
+  row.append(card);
+  return row;
+}
+function renderCollection(query) {
+  const active = view === "collection";
+  $("collection-nav").setAttribute("aria-current", active ? "page" : "false");
+  $("collection-view").hidden = !active || !state.novels.length;
+  if ($("collection-view").hidden) return;
+  const sort = state.collectionSort || "changed";
+  const status = state.collectionStatus || "all";
+  const layout = state.collectionLayout || "grid";
+  $("collection-sort").value = sort;
+  $("collection-status").value = status;
+  for (const name of ["grid", "list"])
+    $(`collection-${name}`).setAttribute("aria-pressed", String(layout === name));
+  const list = $("collection-items");
+  list.dataset.layout = layout;
+  const matches = changeTimes(state.novels.filter((n) =>
+    matchesTitle(n, query) && (status === "all" || status === (n.status || "unknown")),
+  ));
+  matches.sort((a, b) =>
+    (sort === "changed" ? b.changed - a.changed : 0) ||
+    titleOrder.compare(a.novel.title, b.novel.title) ||
+    titleOrder.compare(a.novel.id, b.novel.id),
+  );
+  const count = matches.length === state.novels.length
+    ? `Всего ${matches.length}`
+    : `Найдено ${matches.length} из ${state.novels.length}`;
+  if ($("collection-count").textContent !== count) $("collection-count").textContent = count;
+  $("collection-empty").hidden = !!matches.length;
+  const key = JSON.stringify(matches.map(({ novel, changed, cover }) =>
+    [novel.id, novel.title, novel.status, changed, cover?.hash],
+  ));
+  if (key === collectionRenderKey) return;
+  collectionRenderKey = key;
+  const focused = list.contains(document.activeElement) ? document.activeElement.dataset.novelId : undefined;
+  const rows = matches.map(collectionCard);
+  list.replaceChildren(...rows);
+  if (focused) rows.find((row) => row.firstChild.dataset.novelId === focused)?.firstChild.focus({ preventScroll: true });
+}
+function activityDescription(event) {
+  const count = event.covers?.length || 0;
+  switch (event.type) {
+    case "cover_saved":
+      return { label: event.initial ? "Первые обложки сохранены" : count > 1 ? "Новые обложки" : "Новая обложка", detail: `${count} PNG в архиве`, icon: "▧", group: "covers" };
+    case "cover_restored":
+      return { label: "PNG восстановлены", detail: `${count} PNG повторно сохранено после удаления файла`, icon: "↺", group: "covers" };
+    case "status_changed":
+      return { label: "Изменился статус", detail: `${state.statusLabels[event.from] || event.from} → ${state.statusLabels[event.to] || event.to}`, icon: "↗", group: "status" };
+    case "title_renamed":
+      return { label: "Изменилось название", detail: `${event.from} → ${event.to}`, icon: "✎", group: "titles" };
+    case "watch_added":
+      return { label: event.resumed ? "Наблюдение возобновлено" : "Добавлен в наблюдение", detail: "", icon: "+", group: "watch" };
+    case "watch_removed":
+      return { label: "Убран из наблюдения", detail: "Сохранённые обложки остаются в архиве", icon: "−", group: "watch" };
+    default:
+      return { label: "Изменение тайтла", detail: "", icon: "·", group: "watch" };
+  }
+}
+function renderActivity() {
+  const events = state.activity || [];
+  const unread = events.filter(e => e.sequence > state.activityReadSequence).length;
+  $("activity-badge").textContent = unread;
+  $("activity-badge").hidden = !unread;
+  $("activity-nav").setAttribute("aria-current", view === "activity" ? "page" : "false");
+  $("activity-nav").setAttribute("aria-label", `Последние события${unread ? `, непрочитанных: ${unread}` : ""}`);
+  $("activity-view").hidden = view !== "activity";
+  if (view !== "activity") return;
+  $("activity-read").disabled = !unread;
+  const query = $("activity-search").value.trim().toLocaleLowerCase("ru"), filter = $("activity-filter").value;
+  // Busy/check snapshots do not recreate thumbnails or move keyboard focus.
+  const key = JSON.stringify([state.activitySequence, state.activityReadSequence, query, filter, activityLimit, state.novels.map(n => n.id)]);
+  if (key === activityRenderKey) return;
+  activityRenderKey = key;
+  const matching = [...events].reverse().filter(event => {
+    const description = activityDescription(event);
+    return (filter === "all" || filter === description.group) && `${event.title} ${event.novelId} ${description.label} ${description.detail}`.toLocaleLowerCase("ru").includes(query);
+  });
+  $("activity-count").textContent = `Показано ${Math.min(activityLimit, matching.length)} из ${matching.length}`;
+  $("activity-empty").hidden = !!matching.length;
+  $("activity-empty-title").textContent = events.length ? "События не найдены" : "Пока нет событий";
+  $("activity-empty-text").textContent = events.length ? "Попробуйте другой запрос или тип события." : "Здесь появятся новые обложки, смены статуса и другие изменения тайтлов.";
+  $("activity-list").replaceChildren();
+  for (const event of matching.slice(0, activityLimit)) {
+    const description = activityDescription(event), active = state.novels.some(n => n.id === event.novelId);
+    const row = item("li", `activity-event ${description.group}${event.sequence > state.activityReadSequence ? " unread" : ""}`);
+    row.dataset.sequence = event.sequence;
+    row.dataset.type = event.type;
+    const icon = item("span", "activity-icon", description.icon);
+    icon.setAttribute("aria-hidden", "true");
+    const body = item("div", "activity-body"), head = item("div", "activity-event-heading");
+    head.append(item("strong", "activity-label", description.label));
+    const time = item("time", "activity-time", new Date(event.at).toLocaleString("ru-RU", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }));
+    time.dateTime = event.at;
+    head.append(time);
+    const title = item("button", "activity-title", event.title || `Novelpia ${event.novelId}`);
+    title.title = active ? "Перейти к тайтлу" : "Открыть страницу на Novelpia";
+    title.onclick = () => active ? selectTitle(event.novelId) : call("open-site", event.novelId).catch(e => toast(e.message));
+    body.append(head, title);
+    if (description.detail) body.append(item("p", "activity-detail", description.detail));
+    if (event.covers?.length) {
+      const covers = item("div", "activity-covers");
+      for (const entry of event.covers.slice(0, 2)) {
+        const button = item("button", "activity-cover");
+        button.title = "Открыть PNG";
+        button.setAttribute("aria-label", `Открыть PNG: ${event.title}`);
+        const preview = item("img");
+        preview.src = image(event.novelId, entry.hash);
+        preview.loading = "lazy";
+        preview.alt = "";
+        preview.onerror = () => { preview.hidden = true; };
+        const info = item("span");
+        info.append(item("strong", "", entry.kind === "original" ? "Оригинал" : entry.kind === "cover" ? "Обложка" : "PNG из архива"));
+        info.append(item("span", "", `${entry.width} × ${entry.height} · PNG ↗`));
+        button.append(preview, info);
+        button.onclick = () => call("open-file", { id: event.novelId, hash: entry.hash }).catch(e => toast(e.message));
+        covers.append(button);
+      }
+      body.append(covers);
+    }
+    const tags = item("div", "activity-tags");
+    if (event.sequence > state.activityReadSequence) tags.append(item("span", "activity-new", "Новое"));
+    if (event.imported) tags.append(item("span", "", "Из истории"));
+    if (!active) tags.append(item("span", "", "Снят с наблюдения · название откроет страницу"));
+    if (tags.children.length) body.append(tags);
+    row.append(icon, body);
+    $("activity-list").append(row);
+  }
+  $("activity-more").hidden = matching.length <= activityLimit;
+}
 function showAdd() {
   if (working) return;
   $("add-error").textContent = "";
@@ -66,6 +292,7 @@ function showAdd() {
 }
 function render() {
   if (!state) return;
+  applyTheme();
   if (!state.novels.some((n) => n.id === selected)) {
     selected = state.novels[0]?.id || null;
     limit = 24;
@@ -90,22 +317,22 @@ function render() {
     `v${state.appVersion} · Интервал: ${state.interval} мин`;
   $("add-root").textContent = state.root || "Папка не выбрана";
   $("settings-root").textContent = state.root || "Папка не выбрана";
-  const query = $("search").value.trim().toLowerCase();
+  const query = $("search").value.trim().toLocaleLowerCase("ru");
   $("novels").replaceChildren();
-  for (const n of state.novels.filter((n) =>
-    (n.title + " " + n.id).toLowerCase().includes(query),
-  )) {
+  for (const n of state.novels.filter((n) => matchesTitle(n, query))) {
     const row = item(
       "button",
-      "novel-row" + (n.id === selected ? " active" : ""),
+      "novel-row" + (view === "title" && n.id === selected ? " active" : ""),
     );
-    row.setAttribute("aria-current", n.id === selected ? "true" : "false");
-    const preview = item("img", "row-image");
-    const latest =
-      n.history.find((e) => e.hash === n.latestHash) || n.history.at(-1);
-    if (latest) preview.src = image(n.id, latest.hash);
-    preview.alt = "";
-    preview.loading = "lazy";
+    row.setAttribute("aria-current", view === "title" && n.id === selected ? "page" : "false");
+    const latest = latestCover(n);
+    const preview = item(latest ? "img" : "span", "row-image");
+    if (latest) {
+      preview.src = image(n.id, latest.hash);
+      preview.alt = "";
+      preview.loading = "lazy";
+      preview.onerror = () => preview.replaceWith(item("span", "row-image"));
+    }
     const info = item("span", "row-info");
     info.append(
       item("span", "row-title", n.title),
@@ -120,12 +347,7 @@ function render() {
       ),
     );
     row.append(preview, info);
-    row.onclick = () => {
-      selected = n.id;
-      limit = 24;
-      statusLimit = 10;
-      render();
-    };
+    row.onclick = () => selectTitle(n.id);
     $("novels").append(row);
   }
   if (!state.novels.length)
@@ -135,9 +357,11 @@ function render() {
   else if (!$("novels").children.length)
     $("novels").append(item("p", "muted", "Ничего не найдено."));
   const n = current();
-  $("empty").hidden = !!n;
-  $("detail").hidden = !n;
-  if (!n) return;
+  renderCollection(query);
+  renderActivity();
+  $("empty").hidden = view === "activity" || !!n;
+  $("detail").hidden = view !== "title" || !n;
+  if ($("detail").hidden) return;
   $("title").textContent = n.title;
   $("novel-id").textContent = `novelpia.com / novel / ${n.id}`;
   $("title-status").textContent =
@@ -192,8 +416,7 @@ function render() {
   $("check-one").textContent = busy ? "Проверяем…" : "Проверить сейчас";
   $("error").hidden = !n.error;
   $("error").textContent = n.error;
-  const latest =
-    n.history.find((e) => e.hash === n.latestHash) || n.history.at(-1);
+  const latest = latestCover(n);
   $("cover").hidden = !latest;
   $("no-cover").hidden = !!latest;
   if (latest) {
@@ -251,7 +474,35 @@ document.querySelectorAll(".close-dialog").forEach(
       if (!working) button.closest("dialog").close();
     }),
 );
-$("search").oninput = render;
+$("search").oninput = () => {
+  // Compact windows hide the sidebar title list. Keep the search results visible.
+  if (!$("novels").offsetWidth) view = "collection";
+  render();
+};
+$("collection-nav").onclick = () =>
+  showView("collection", state?.novels.length ? "collection-heading" : "empty-heading");
+function saveCollectionSetting(payload) {
+  call("settings", payload).catch((error) => {
+    renderCollection($("search").value.trim().toLocaleLowerCase("ru"));
+    toast(error.message);
+  });
+}
+$("collection-status").onchange = (event) => saveCollectionSetting({ collectionStatus: event.target.value });
+$("collection-sort").onchange = (event) => saveCollectionSetting({ collectionSort: event.target.value });
+for (const name of ["grid", "list"])
+  $(`collection-${name}`).onclick = () => {
+    if ((state.collectionLayout || "grid") !== name) saveCollectionSetting({ collectionLayout: name });
+  };
+$("activity-nav").onclick = () => {
+  if (!state) return;
+  showView("activity", "activity-heading");
+  // Only acknowledge this snapshot; a later check may already be queued.
+  call("activity-read", state.activitySequence).catch(e => toast(e.message));
+};
+for (const id of ["activity-search", "activity-filter"])
+  $(id).addEventListener(id === "activity-search" ? "input" : "change", () => { activityLimit = 40; renderActivity(); });
+$("activity-more").onclick = () => { activityLimit += 40; renderActivity(); };
+$("activity-read").onclick = () => call("activity-read", state.activitySequence).catch(e => toast(e.message));
 $("more").onclick = () => {
   limit += 24;
   render();
@@ -269,6 +520,8 @@ $("check-one").onclick = () =>
 $("open-site").onclick = () =>
   call("open-site", selected).catch((e) => toast(e.message));
 $("settings").onclick = () => {
+  if (!state) return;
+  $("theme").value = state.theme || "light";
   $("interval").value = state.interval;
   $("notifications").checked = state.notifications;
   fillPolicy("status", state.statusNotifications);
@@ -281,6 +534,7 @@ $("settings-form").onsubmit = async (event) => {
   event.preventDefault();
   try {
     await call("settings", {
+      theme: $("theme").value,
       interval: Number($("interval").value),
       notifications: $("notifications").checked,
       statusNotifications: readPolicy("status", true),
@@ -301,8 +555,7 @@ $("add-form").onsubmit = async (event) => {
   $("add-error").textContent = "";
   try {
     const result = await call("add", $("novel-url").value);
-    selected = result.novels.at(-1)?.id;
-    render();
+    selectTitle(result.novels.at(-1)?.id);
     $("add-dialog").close();
     toast(
       current()?.error
@@ -376,18 +629,16 @@ $("remove-form").onsubmit = async (event) => {
     toast(e.message);
   }
 };
-api.subscribe((value) => {
-  state = value;
-  render();
-});
+themeMedia.addEventListener("change", applyTheme);
+api.subscribe(updateState);
 api.subscribeErrors(toast);
 api.subscribeSelection((id) => {
+  if (!state) {
+    pendingSelection = id;
+    return;
+  }
   if (state?.novels.some((n) => n.id === id)) {
-    selected = id;
-    limit = 24;
-    statusLimit = 10;
-    render();
-    window.scrollTo({ top: 0, behavior: "instant" });
+    selectTitle(id);
   }
 });
 call("snapshot").catch((e) => toast(e.message));

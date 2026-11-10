@@ -1,0 +1,6 @@
+{
+  "identifier": "main",
+  "description": "Listen for local archive updates and title selection",
+  "windows": ["main"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
+}

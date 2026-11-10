@@ -6,3 +6,5 @@ release/
 *.zip
 *.blockmap
 dist/
+target/
+src-tauri/gen/

@@ -3,10 +3,6 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <meta
-      http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' cover:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
-    />
     <title>Novelpia • Обложки и статусы</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
@@ -18,6 +14,21 @@
           <div><strong>Novelpia</strong><span>Обложки и статусы</span></div>
         </div>
         <button id="add" class="primary">＋ Добавить новеллу</button>
+        <nav class="sidebar-nav" aria-label="Разделы архива">
+          <button id="collection-nav" class="nav-button" aria-current="page">
+            <svg viewBox="0 0 20 20" aria-hidden="true">
+              <path d="M3 3.5h5.5v5.5H3zm8.5 0H17v5.5h-5.5zM3 12h5.5v5.5H3zm8.5 0H17v5.5h-5.5z" />
+            </svg>
+            <span>Коллекция</span>
+          </button>
+          <button id="activity-nav" class="nav-button" aria-current="false">
+            <svg viewBox="0 0 20 20" aria-hidden="true">
+              <circle cx="10" cy="10" r="7" /><path d="M10 5.5V10l3 2" />
+            </svg>
+            <span>Последние события</span>
+            <span id="activity-badge" class="activity-badge" hidden>0</span>
+          </button>
+        </nav>
         <label class="search"
           ><span class="sr-only">Найти новеллу</span
           ><input id="search" type="search" placeholder="Найти в коллекции"
@@ -48,9 +59,82 @@
           role="status"
           hidden
         ></div>
+        <section id="collection-view" aria-labelledby="collection-heading" hidden>
+          <header class="collection-heading">
+            <h1 id="collection-heading" tabindex="-1">Коллекция</h1>
+            <div class="collection-layout" role="group" aria-label="Вид коллекции">
+              <button id="collection-grid" type="button" aria-pressed="true" aria-label="Сетка" title="Сетка">
+                <svg viewBox="0 0 20 20" aria-hidden="true">
+                  <path d="M3 3.5h5.5v5.5H3zm8.5 0H17v5.5h-5.5zM3 12h5.5v5.5H3zm8.5 0H17v5.5h-5.5z" />
+                </svg>
+              </button>
+              <button id="collection-list" type="button" aria-pressed="false" aria-label="Список" title="Список">
+                <svg viewBox="0 0 20 20" aria-hidden="true">
+                  <path d="M7 5h10M7 10h10M7 15h10M3 5h.1M3 10h.1M3 15h.1" />
+                </svg>
+              </button>
+            </div>
+          </header>
+          <div class="collection-toolbar">
+            <label>Статус
+              <select id="collection-status">
+                <option value="all">Все статусы</option>
+                <option value="ongoing">Продолжается</option>
+                <option value="completed">Завершён</option>
+                <option value="discontinued">Выпуск остановлен</option>
+                <option value="delayed">Выпуск задерживается</option>
+                <option value="unknown">Не определён</option>
+              </select>
+            </label>
+            <label>Сортировка
+              <select id="collection-sort">
+                <option value="changed">Сначала изменившиеся</option>
+                <option value="title">По названию</option>
+              </select>
+            </label>
+            <span id="collection-count" role="status"></span>
+          </div>
+          <p id="collection-empty" class="muted" hidden>Новеллы не найдены. Измените запрос или выберите другой статус.</p>
+          <ul id="collection-items" class="collection-items" aria-label="Новеллы под наблюдением"></ul>
+        </section>
+        <section id="activity-view" aria-labelledby="activity-heading" hidden>
+          <div class="activity-heading">
+            <div>
+              <p class="source-label">ЖУРНАЛ НАБЛЮДЕНИЯ</p>
+              <h1 id="activity-heading" tabindex="-1">Последние события</h1>
+              <p class="activity-intro">Что изменилось в вашей коллекции — в одном месте.</p>
+            </div>
+            <button id="activity-read">Отметить прочитанным</button>
+          </div>
+          <div class="activity-filters">
+            <label class="activity-search">
+              <span class="sr-only">Найти событие по названию или изменению</span>
+              <input id="activity-search" type="search" placeholder="Найти в событиях" />
+            </label>
+            <label>
+              <span class="sr-only">Тип события</span>
+              <select id="activity-filter">
+                <option value="all">Все события</option>
+                <option value="covers">Обложки</option>
+                <option value="status">Статусы</option>
+                <option value="titles">Названия</option>
+                <option value="watch">Наблюдение</option>
+              </select>
+            </label>
+            <span id="activity-count" class="muted" role="status"></span>
+          </div>
+          <div id="activity-empty" class="activity-empty" hidden>
+            <span aria-hidden="true">◷</span>
+            <h2 id="activity-empty-title">Пока нет событий</h2>
+            <p id="activity-empty-text">Здесь появятся новые обложки, смены статуса и другие изменения тайтлов.</p>
+          </div>
+          <ol id="activity-list" class="activity-list" aria-label="События по тайтлам"></ol>
+          <button id="activity-more" hidden>Показать ещё</button>
+          <p class="activity-footnote">Хранятся последние 500 событий. Время — момент обнаружения изменения. События «Из истории» перенесены из вашего архива.</p>
+        </section>
         <section id="empty" class="empty">
           <div class="empty-art" aria-hidden="true">▤</div>
-          <h1>Сохраните историю обложек</h1>
+          <h1 id="empty-heading" tabindex="-1">Сохраните историю обложек</h1>
           <p>
             Добавьте новеллу — её текущая обложка и новые версии будут
             сохраняться в выбранную папку.
@@ -62,7 +146,7 @@
           <div class="detail-heading">
             <div>
               <p class="source-label" id="novel-id"></p>
-              <h1 id="title"></h1>
+              <h1 id="title" tabindex="-1"></h1>
             </div>
             <button
               id="remove"
@@ -191,6 +275,13 @@
             ×
           </button>
         </div>
+        <label>Тема оформления
+          <select id="theme">
+            <option value="light">Светлая</option>
+            <option value="dark">Тёмная</option>
+            <option value="system">Как в Windows</option>
+          </select>
+        </label>
         <label
           >Интервал проверки, минут<input
             id="interval"
