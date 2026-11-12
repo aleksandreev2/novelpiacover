@@ -335,6 +335,9 @@ impl Desktop {
             }
             "add" | "check" | "remove" | "novel-notifications" | "activity-read" => {
                 self.monitor.action(action, payload)?;
+                if matches!(action, "add" | "check") {
+                    start_checks(app);
+                }
                 Ok(self.snapshot())
             }
             _ => bail!("Неизвестное действие."),
@@ -502,6 +505,19 @@ fn report(app: &AppHandle, error: &anyhow::Error) {
     let _ = app.emit_to(MAIN, "archive-error", format!("{error:#}"));
 }
 
+fn start_checks(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let desktop = app.state::<Desktop>();
+        let _operation = desktop.operations.read().unwrap();
+        if !desktop.shutting_down.load(Ordering::Acquire) {
+            if let Err(error) = desktop.monitor.run_checks() {
+                report(&app, &error);
+            }
+        }
+    });
+}
+
 fn start_tick(app: &AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || loop {
@@ -524,6 +540,7 @@ fn quit(app: &AppHandle) {
     if desktop.shutting_down.swap(true, Ordering::AcqRel) {
         return;
     }
+    desktop.monitor.stop_checks();
     if let Some(window) = app.get_webview_window(MAIN) {
         let _ = window.hide();
     }
@@ -531,7 +548,6 @@ fn quit(app: &AppHandle) {
     tauri::async_runtime::spawn_blocking(move || {
         let desktop = app.state::<Desktop>();
         let _operations = desktop.operations.write().unwrap();
-        desktop.monitor.wait_for_idle();
         desktop.monitor.set_changed(|| {});
         app.exit(0);
     });

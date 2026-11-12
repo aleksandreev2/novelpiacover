@@ -1,8 +1,8 @@
 use crate::{
     archive::{self, Archive},
     model::{
-        atomic_write, label, now, Activity, Cover, Novel, Policy, Profile, Store, Transition,
-        STATUSES,
+        atomic_write, label, now, Activity, Cover, Novel, Policy, Profile, Rename, Store,
+        Transition, STATUSES,
     },
     novelpia::{inspect_page, parse_novel_url, safe_folder, Client, FetchError},
 };
@@ -10,10 +10,13 @@ use anyhow::{anyhow, bail, Context, Result};
 use chrono::Utc;
 use serde_json::{json, Value};
 use std::{
-    collections::HashSet,
+    collections::{HashSet, VecDeque},
     fs,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
 };
 
 pub struct Notice {
@@ -26,11 +29,45 @@ pub struct Notice {
 pub struct Monitor {
     store: Mutex<Store>,
     client: Client,
-    operation: Mutex<()>,
+    checks: Mutex<Checks>,
+    archive_write: Mutex<()>,
+    revision: AtomicU64,
     preview_gate: Mutex<()>,
-    busy: Mutex<Option<String>>,
     notices: Mutex<Vec<Notice>>,
     callback: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+}
+
+struct CheckJob {
+    id: String,
+    automatic: bool,
+    adding: bool,
+}
+
+#[derive(Default)]
+struct Checks {
+    pending: VecDeque<CheckJob>,
+    current: Option<String>,
+    completed: usize,
+    running: bool,
+    cancelled: bool,
+    stopping: bool,
+}
+
+impl Checks {
+    fn enqueue(&mut self, job: CheckJob) {
+        if self.stopping || (!self.cancelled && self.current.as_ref() == Some(&job.id)) {
+            return;
+        }
+        if let Some(queued) = self.pending.iter_mut().find(|queued| queued.id == job.id) {
+            queued.automatic &= job.automatic;
+            return;
+        }
+        if job.adding {
+            self.pending.push_front(job);
+        } else {
+            self.pending.push_back(job);
+        }
+    }
 }
 
 impl Monitor {
@@ -40,9 +77,10 @@ impl Monitor {
         Ok(Self {
             store: Mutex::new(store),
             client: Client::new()?,
-            operation: Mutex::new(()),
+            checks: Mutex::new(Checks::default()),
+            archive_write: Mutex::new(()),
+            revision: AtomicU64::new(0),
             preview_gate: Mutex::new(()),
-            busy: Mutex::new(None),
             notices: Mutex::new(Vec::new()),
             callback: Mutex::new(None),
         })
@@ -59,8 +97,10 @@ impl Monitor {
         }
     }
 
-    pub fn wait_for_idle(&self) {
-        drop(self.operation.lock().unwrap());
+    pub fn stop_checks(&self) {
+        let mut checks = self.checks.lock().unwrap();
+        checks.stopping = true;
+        checks.pending.clear();
     }
 
     pub fn drain_notices(&self) -> Vec<Notice> {
@@ -70,7 +110,22 @@ impl Monitor {
     pub fn snapshot(&self) -> Value {
         let store = self.store.lock().unwrap();
         let mut state = serde_json::to_value(&store.profile).expect("profile JSON");
-        state["busy"] = json!(self.busy.lock().unwrap().iter().collect::<Vec<_>>());
+        let checks = self.checks.lock().unwrap();
+        let total = checks.completed
+            + checks.pending.len()
+            + usize::from(checks.current.is_some() && !checks.cancelled);
+        state["busy"] = json!(checks
+            .current
+            .iter()
+            .filter(|_| !checks.cancelled)
+            .collect::<Vec<_>>());
+        state["queued"] = json!(checks.pending.iter().map(|job| &job.id).collect::<Vec<_>>());
+        state["checkProgress"] = if total == 0 {
+            Value::Null
+        } else {
+            json!({"completed": checks.completed, "total": total})
+        };
+        state["revision"] = json!(self.revision.fetch_add(1, Ordering::Relaxed));
         state["recovered"] = json!(store.recovered);
         state["statusLabels"] =
             json!(
@@ -89,38 +144,39 @@ impl Monitor {
         self.store.lock().unwrap().update(change)
     }
 
-    fn active_ids(&self) -> Vec<String> {
-        self.store
-            .lock()
-            .unwrap()
-            .profile
-            .novels
-            .iter()
-            .map(|n| n.id.clone())
-            .collect()
-    }
-
     pub fn action(&self, action: &str, payload: Value) -> Result<Value> {
         if action == "snapshot" {
             return Ok(self.snapshot());
         }
-        if action == "check" {
-            let ids = if payload.is_null() {
-                self.active_ids()
-            } else {
-                vec![string(&payload)?.to_owned()]
-            };
-            for id in ids {
-                let _job = self.operation.lock().unwrap();
-                self.check(&id, false, !payload.is_null())?;
-            }
-            return Ok(self.snapshot());
-        }
-        let _job = self.operation.lock().unwrap();
         match action {
+            "check" => {
+                let id = if payload.is_null() {
+                    None
+                } else {
+                    Some(string(&payload)?)
+                };
+                let store = self.store.lock().unwrap();
+                if store.profile.root.as_os_str().is_empty() {
+                    bail!("Выберите папку архива.");
+                }
+                if id.is_some_and(|id| !store.profile.novels.iter().any(|novel| novel.id == id)) {
+                    bail!("Новелла не найдена.");
+                }
+                let mut checks = self.checks.lock().unwrap();
+                for novel in &store.profile.novels {
+                    if id.is_none_or(|id| id == novel.id) {
+                        checks.enqueue(CheckJob {
+                            id: novel.id.clone(),
+                            automatic: false,
+                            adding: false,
+                        });
+                    }
+                }
+            }
             "add" => {
                 let (id, url) = parse_novel_url(string(&payload)?)?;
-                self.update(|s| {
+                let mut store = self.store.lock().unwrap();
+                store.update(|s| {
                     if s.root.as_os_str().is_empty() {
                         bail!("Сначала выберите папку архива.");
                     }
@@ -142,25 +198,25 @@ impl Monitor {
                     s.append(vec![event]);
                     Ok(())
                 })?;
-                self.changed();
-                self.check(&id, true, true)?;
-                return Ok(self.snapshot());
+                self.checks.lock().unwrap().enqueue(CheckJob {
+                    id,
+                    automatic: false,
+                    adding: true,
+                });
             }
-            "remove" => {
-                let id = string(&payload)?;
-                self.update(|s| {
-                    let index = s
-                        .novels
-                        .iter()
-                        .position(|n| n.id == id)
-                        .context("Новелла не найдена.")?;
-                    let novel = s.novels.remove(index);
-                    s.append(vec![Activity::new(&novel, "watch_removed", now())]);
-                    s.retired.insert(novel.id.clone(), novel);
-                    Ok(())
-                })?;
+            "remove" => self.remove(&payload)?,
+            "settings" => {
+                let pause = payload["paused"].as_bool() == Some(true);
+                let mut store = self.store.lock().unwrap();
+                store.update(|s| update_settings(s, payload))?;
+                if pause {
+                    self.checks
+                        .lock()
+                        .unwrap()
+                        .pending
+                        .retain(|job| !job.automatic);
+                }
             }
-            "settings" => self.update(|s| update_settings(s, payload))?,
             "novel-notifications" => {
                 let id = string(&payload["id"])?;
                 let policy: Option<Policy> = serde_json::from_value(
@@ -183,17 +239,15 @@ impl Monitor {
             }
             "activity-read" => {
                 let sequence = payload.as_u64().context("Неверная отметка прочтения.")?;
-                {
-                    let store = self.store.lock().unwrap();
-                    if sequence > store.profile.activity_sequence {
-                        bail!("Неверная отметка прочтения.");
-                    }
-                    if sequence <= store.profile.activity_read_sequence {
-                        drop(store);
-                        return Ok(self.snapshot());
-                    }
+                let mut store = self.store.lock().unwrap();
+                if sequence > store.profile.activity_sequence {
+                    bail!("Неверная отметка прочтения.");
                 }
-                self.update(|s| {
+                if sequence <= store.profile.activity_read_sequence {
+                    drop(store);
+                    return Ok(self.snapshot());
+                }
+                store.update(|s| {
                     s.activity_read_sequence = sequence;
                     Ok(())
                 })?;
@@ -204,61 +258,200 @@ impl Monitor {
         Ok(self.snapshot())
     }
 
-    pub fn tick(&self) -> Result<()> {
-        for id in self.active_ids() {
-            let Ok(_job) = self.operation.try_lock() else {
-                return Ok(());
-            };
-            let due = {
+    fn remove(&self, payload: &Value) -> Result<()> {
+        let (id, delete_archive) = if let Some(id) = payload.as_str() {
+            (id, false)
+        } else {
+            (
+                string(&payload["id"])?,
+                payload["deleteArchive"]
+                    .as_bool()
+                    .context("Неверная настройка удаления архива.")?,
+            )
+        };
+        let _archive_write = self.archive_write.lock().unwrap();
+        if delete_archive {
+            let (novel, root) = {
                 let store = self.store.lock().unwrap();
-                let profile = &store.profile;
-                !profile.paused
-                    && !profile.root.as_os_str().is_empty()
-                    && profile
-                        .novels
-                        .iter()
-                        .any(|n| n.id == id && n.next_check <= Utc::now().timestamp_millis())
+                let novel = store
+                    .profile
+                    .novels
+                    .iter()
+                    .find(|novel| novel.id == id)
+                    .context("Новелла не найдена.")?;
+                (novel.clone(), store.profile.root.clone())
             };
-            if due {
-                self.check(&id, false, false)?;
+            archive::recycle_folders(&novel, &root)?;
+        }
+        let mut store = self.store.lock().unwrap();
+        let saved = store.update(|profile| {
+            let index = profile
+                .novels
+                .iter()
+                .position(|novel| novel.id == id)
+                .context("Новелла не найдена.")?;
+            let mut novel = profile.novels.remove(index);
+            let mut event = Activity::new(&novel, "watch_removed", now());
+            if delete_archive {
+                novel.history.clear();
+                novel.latest_hash = None;
+                novel.last_saved = 0;
+                event.archive_deleted = true;
+                for previous in profile
+                    .activity
+                    .iter_mut()
+                    .filter(|e| e.novel_id == id && !e.covers.is_empty())
+                {
+                    previous.covers.clear();
+                    previous.archive_deleted = true;
+                }
             }
+            profile.append(vec![event]);
+            profile.retired.insert(novel.id.clone(), novel);
+            Ok(())
+        });
+        if delete_archive {
+            saved.context(
+                "Не удалось обновить профиль после обработки архива. Проверьте корзину Windows.",
+            )?;
+        } else {
+            saved?;
+        }
+        let mut checks = self.checks.lock().unwrap();
+        checks.pending.retain(|job| job.id != id);
+        if checks.current.as_deref() == Some(id) {
+            checks.cancelled = true;
         }
         Ok(())
     }
 
-    fn check(&self, id: &str, adding: bool, required: bool) -> Result<()> {
-        let (novel, root, interval) = {
+    pub fn tick(&self) -> Result<()> {
+        {
             let store = self.store.lock().unwrap();
-            let s = &store.profile;
-            let Some(novel) = s.novels.iter().find(|n| n.id == id) else {
-                if required {
-                    bail!("Новелла не найдена.");
-                }
+            let profile = &store.profile;
+            let mut checks = self.checks.lock().unwrap();
+            if checks.running || checks.stopping {
                 return Ok(());
-            };
-            if s.root.as_os_str().is_empty() {
-                bail!("Выберите папку архива.");
             }
-            (novel.clone(), s.root.clone(), s.interval)
-        };
-        *self.busy.lock().unwrap() = Some(id.to_owned());
-        self.changed();
-        let result = self.perform_check(novel, &root, interval, adding, |url, image| {
-            self.client.fetch(url, image)
-        });
-        *self.busy.lock().unwrap() = None;
-        self.changed();
-        result
+            if !profile.paused && !profile.root.as_os_str().is_empty() {
+                let now = Utc::now().timestamp_millis();
+                for novel in profile
+                    .novels
+                    .iter()
+                    .filter(|novel| novel.next_check <= now)
+                {
+                    checks.enqueue(CheckJob {
+                        id: novel.id.clone(),
+                        automatic: true,
+                        adding: false,
+                    });
+                }
+            }
+        }
+        self.run_checks()
+    }
+
+    pub fn run_checks(&self) -> Result<()> {
+        self.run_checks_with(|url, image| self.client.fetch(url, image))
+    }
+
+    fn current_check_cancelled(&self) -> bool {
+        let checks = self.checks.lock().unwrap();
+        checks.cancelled || checks.stopping
+    }
+
+    fn run_checks_with(
+        &self,
+        fetch: impl Fn(&str, bool) -> std::result::Result<Vec<u8>, FetchError>,
+    ) -> Result<()> {
+        {
+            let mut checks = self.checks.lock().unwrap();
+            if checks.running || checks.pending.is_empty() {
+                return Ok(());
+            }
+            checks.running = true;
+        }
+        let mut result = Ok(());
+        loop {
+            let job = {
+                let mut checks = self.checks.lock().unwrap();
+                let job = checks.pending.pop_front();
+                if let Some(job) = &job {
+                    checks.current = Some(job.id.clone());
+                    checks.cancelled = false;
+                } else {
+                    checks.running = false;
+                    checks.completed = 0;
+                }
+                job
+            };
+            self.changed();
+            let Some(job) = job else { return result };
+            let novel = {
+                let store = self.store.lock().unwrap();
+                let profile = &store.profile;
+                profile
+                    .novels
+                    .iter()
+                    .find(|n| {
+                        n.id == job.id
+                            && (!job.automatic
+                                || (!profile.paused
+                                    && n.next_check <= Utc::now().timestamp_millis()))
+                    })
+                    .cloned()
+            };
+            let attempted = novel.is_some();
+            if let Some(novel) = novel {
+                if let Err(error) = self.perform_check(novel, job.adding, &fetch) {
+                    result = Err(error);
+                }
+            }
+            {
+                let mut checks = self.checks.lock().unwrap();
+                checks.current = None;
+                if attempted && !checks.cancelled && !checks.stopping {
+                    checks.completed += 1;
+                }
+            }
+            self.changed();
+        }
     }
 
     fn perform_check(
         &self,
         mut novel: Novel,
-        root: &std::path::Path,
-        interval: u32,
         adding: bool,
         fetch: impl Fn(&str, bool) -> std::result::Result<Vec<u8>, FetchError>,
     ) -> Result<()> {
+        if self.current_check_cancelled() {
+            return Ok(());
+        }
+        let response = match fetch(&novel.url, false) {
+            Ok(page) => {
+                let data = inspect_page(&String::from_utf8_lossy(&page));
+                let mut images = Vec::with_capacity(data.sources.len());
+                for source in &data.sources {
+                    if self.current_check_cancelled() {
+                        return Ok(());
+                    }
+                    images.push(fetch(&source.url, true));
+                }
+                Ok((data, images))
+            }
+            Err(error) => Err(error),
+        };
+        // Only local archive writes and removals share this lock.
+        let _archive_write = self.archive_write.lock().unwrap();
+        let root = {
+            let store = self.store.lock().unwrap();
+            if self.current_check_cancelled()
+                || !store.profile.novels.iter().any(|n| n.id == novel.id)
+            {
+                return Ok(());
+            }
+            store.profile.root.clone()
+        };
         let mut errors = Vec::new();
         let mut retry = 0;
         let mut events = Vec::new();
@@ -267,13 +460,12 @@ impl Monitor {
         let mut restored = Vec::new();
         let initial = novel.history.is_empty();
         let known: HashSet<_> = novel.history.iter().map(|e| e.hash.clone()).collect();
-        match fetch(&novel.url, false) {
+        match response {
             Err(error) => {
                 retry = error.retry_after_ms;
                 errors.push(error.to_string());
             }
-            Ok(page) => {
-                let data = inspect_page(&String::from_utf8_lossy(&page));
+            Ok((data, images)) => {
                 if let Some(title) = data.title.filter(|title| !title.is_empty()) {
                     let old = std::mem::replace(&mut novel.title, title);
                     if old != novel.title
@@ -281,9 +473,14 @@ impl Monitor {
                         && old != format!("Novelpia {}", novel.id)
                     {
                         let mut event = Activity::new(&novel, "title_renamed", now());
-                        event.from = Some(old);
+                        event.from = Some(old.clone());
                         event.to = Some(novel.title.clone());
                         novel.note_change(&event.at);
+                        novel.title_history.push(Rename {
+                            from: old,
+                            to: novel.title.clone(),
+                            at: event.at.clone(),
+                        });
                         events.push(event);
                     }
                 }
@@ -312,7 +509,7 @@ impl Monitor {
                         })?;
                     }
                     novel.sources = data.sources;
-                    match Archive::open(&novel, root) {
+                    match Archive::open(&novel, &root) {
                         Err(error) => errors.push(error.to_string()),
                         Ok(mut archive) => {
                             let mut discovered = known.clone();
@@ -331,8 +528,8 @@ impl Monitor {
                                 }
                             }
                             let mut latest = None;
-                            for source in novel.sources.clone() {
-                                let image = match fetch(&source.url, true) {
+                            for (source, image) in novel.sources.iter().zip(images) {
+                                let image = match image {
                                     Ok(bytes) => bytes,
                                     Err(error) => {
                                         retry = retry.max(error.retry_after_ms);
@@ -343,7 +540,7 @@ impl Monitor {
                                         continue;
                                     }
                                 };
-                                match archive.save(&novel, &source, &image) {
+                                match archive.save(&novel, source, &image) {
                                     Ok((entry, saved)) => {
                                         if latest.is_none() {
                                             latest = Some(entry.hash.clone());
@@ -392,19 +589,22 @@ impl Monitor {
         } else {
             novel.failures.saturating_add(1)
         };
-        let delay = u64::from(interval) * 60_000;
-        let delay = if errors.is_empty() {
-            delay
-        } else {
-            retry.max(delay.min(60_000 * 2_u64.pow(novel.failures.saturating_sub(1).min(10))))
-        };
-        novel.next_check = Utc::now().timestamp_millis() + delay as i64;
         self.update(|s| {
+            let delay = u64::from(s.interval) * 60_000;
+            let delay = if errors.is_empty() {
+                delay
+            } else {
+                retry.max(delay.min(60_000 * 2_u64.pow(novel.failures.saturating_sub(1).min(10))))
+            };
+            novel.next_check = Utc::now().timestamp_millis() + delay as i64;
             let target = s
                 .novels
                 .iter_mut()
                 .find(|n| n.id == novel.id)
                 .context("Новелла не найдена.")?;
+            novel
+                .status_notifications
+                .clone_from(&target.status_notifications);
             *target = novel.clone();
             resolve_initial_title(s, &novel);
             s.append(events);
@@ -622,6 +822,127 @@ mod tests {
     use super::*;
 
     #[test]
+    fn collection_settings_and_add_complete_while_a_check_waits_for_the_page() {
+        use std::{sync::mpsc, thread, time::Duration};
+
+        let dir = tempfile::tempdir().unwrap();
+        let monitor = Monitor::open(dir.path().join("profile")).unwrap();
+        let root = dir.path().join("archive");
+        fs::create_dir(&root).unwrap();
+        let novel = Novel {
+            id: "1".into(),
+            url: "https://novelpia.com/novel/1".into(),
+            ..Default::default()
+        };
+        monitor
+            .update(|profile| {
+                profile.root = root.clone();
+                profile.novels.push(novel.clone());
+                Ok(())
+            })
+            .unwrap();
+        let (fetching, started) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let (saved, finished) = mpsc::channel();
+        monitor.action("check", json!("1")).unwrap();
+        thread::scope(|scope| {
+            let monitor = &monitor;
+            scope.spawn(move || {
+                monitor
+                    .run_checks_with(|url, _| {
+                        if url.ends_with("/1") {
+                            fetching.send(()).unwrap();
+                            released.recv().unwrap();
+                        }
+                        Ok(Vec::new())
+                    })
+                    .unwrap();
+            });
+            if let Err(error) = started.recv_timeout(Duration::from_secs(3)) {
+                drop(release);
+                panic!("check did not start: {error}");
+            }
+            scope.spawn(move || {
+                let result = monitor
+                    .action("settings", json!({"collectionLayout": "list"}))
+                    .and_then(|_| {
+                        monitor.action(
+                            "novel-notifications",
+                            json!({
+                                "id": "1", "policy": {"enabled": false, "targets": []}
+                            }),
+                        )
+                    })
+                    .and_then(|_| monitor.action("add", json!("https://novelpia.com/novel/2")));
+                saved.send(result).unwrap();
+            });
+            let while_fetching = finished.recv_timeout(Duration::from_secs(2));
+            release.send(()).unwrap();
+            let snapshot = while_fetching
+                .expect("actions should complete during the network request")
+                .unwrap();
+            assert_eq!(snapshot["collectionLayout"], "list");
+            assert_eq!(snapshot["novels"][1]["id"], "2");
+            assert_eq!(snapshot["busy"], json!(["1"]));
+            assert_eq!(snapshot["queued"], json!(["2"]));
+            assert_eq!(
+                snapshot["checkProgress"],
+                json!({"completed": 0, "total": 2})
+            );
+        });
+        let snapshot = monitor.snapshot();
+        assert_eq!(
+            snapshot["novels"][0]["statusNotifications"]["enabled"],
+            false
+        );
+        assert!(snapshot["novels"][1]["lastCheck"].is_string());
+        assert!(snapshot["checkProgress"].is_null());
+    }
+
+    #[test]
+    fn a_removed_check_cannot_write_into_a_new_watch_of_the_same_title() {
+        use std::{sync::mpsc, thread, time::Duration};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("archive");
+        fs::create_dir(&root).unwrap();
+        let monitor = Monitor::open(dir.path().join("profile")).unwrap();
+        monitor.action("settings", json!({ "root": root })).unwrap();
+        let url = json!("https://novelpia.com/novel/1");
+        monitor.action("add", url.clone()).unwrap();
+
+        let (started, waiting) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        thread::scope(|scope| {
+            let monitor = &monitor;
+            scope.spawn(move || {
+                let first = std::cell::Cell::new(true);
+                monitor.run_checks_with(|_, image| {
+                    assert!(!image, "a cancelled check must not start an image request");
+                    let page = if first.replace(false) {
+                        started.send(()).unwrap();
+                        released.recv().unwrap();
+                        r#"<div class="epnew-novel-title">Старый ответ</div><img class="cover_img" src="//images.novelpia.com/imagebox/cover/demo.file">"#
+                    } else {
+                        r#"<div class="epnew-novel-title">Актуальный ответ</div>"#
+                    };
+                    Ok(page.as_bytes().to_vec())
+                }).unwrap();
+            });
+            let result = waiting
+                .recv_timeout(Duration::from_secs(3))
+                .map_err(anyhow::Error::from)
+                .and_then(|_| monitor.action("remove", json!("1")))
+                .and_then(|_| monitor.action("add", url));
+            let _ = release.send(());
+            result.unwrap();
+        });
+        let snapshot = monitor.snapshot();
+        assert_eq!(snapshot["novels"][0]["title"], "Актуальный ответ");
+        assert_eq!(snapshot["novels"][0]["titleHistory"], json!([]));
+    }
+
+    #[test]
     fn first_status_and_unknown_checks_never_generate_transitions() {
         let mut novel = Novel::default();
         assert!(observe(&mut novel, Some("ongoing".into()), String::new()).is_none());
@@ -658,7 +979,7 @@ mod tests {
                 .write_image(&[color, 0, 0, 255], 1, 1, image::ExtendedColorType::Rgba8)
                 .unwrap();
             let novel = monitor.store.lock().unwrap().profile.novels[0].clone();
-            monitor.perform_check(novel, &root, 30, adding, |_, image| {
+            monitor.perform_check(novel, adding, |_, image| {
                 Ok(if image { png.clone() } else {
                     format!(r#"<div class="epnew-novel-title">{title}</div><div class="epnew-writer"><p class="in-writer">Author</p><p class="in-badge"><span>PLUS</span>{badge}</p></div><img class="cover_img" src="//images.novelpia.com/imagebox/cover/demo.file">"#).into_bytes()
                 })
@@ -669,6 +990,8 @@ mod tests {
         assert_eq!(monitor.snapshot()["activity"][0]["initial"], true);
         check("Renamed", "<span>완결</span>", 8, false);
         let state = monitor.snapshot();
+        assert_eq!(state["novels"][0]["titleHistory"][0]["from"], "Book");
+        assert_eq!(state["novels"][0]["titleHistory"][0]["to"], "Renamed");
         let types: HashSet<_> = state["activity"]
             .as_array()
             .unwrap()

@@ -11,10 +11,23 @@ use image::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
+    ffi::OsStr,
     fs::{self, File},
-    io::{BufRead, BufReader, Cursor, Read, Seek},
+    io::{BufRead, BufReader, Cursor, ErrorKind, Read, Seek},
+    os::windows::fs::MetadataExt,
     path::{Component, Path, PathBuf},
+};
+use windows::{
+    core::HSTRING,
+    Win32::{
+        Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT,
+        System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED},
+        UI::Shell::{
+            BHID_Transfer, FOLDERID_RecycleBinFolder, IShellItem, ITransferSource,
+            SHCreateItemFromParsingName, SHGetKnownFolderItem, KF_FLAG_DEFAULT, TSF_NORMAL,
+        },
+    },
 };
 
 const MAX_PIXELS: u64 = 40_000_000;
@@ -96,6 +109,210 @@ pub fn known_file(entry: &Entry, novel: &Novel) -> bool {
 
 fn exists(file: &Path) -> bool {
     fs::symlink_metadata(file).is_ok_and(|m| m.file_type().is_file())
+}
+
+fn is_reparse_point(metadata: &fs::Metadata) -> bool {
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+}
+
+fn checked_directory(directory: &Path, folder: &OsStr) -> Result<Option<PathBuf>> {
+    if !directory.is_absolute()
+        || directory
+            .components()
+            .any(|part| part == Component::ParentDir)
+    {
+        bail!("Недопустимый путь к папке архива.");
+    }
+    let ancestors: Vec<_> = directory.ancestors().collect();
+    for path in ancestors.into_iter().rev() {
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        if !metadata.is_dir() || is_reparse_point(&metadata) {
+            bail!(
+                "Путь архива содержит ссылку или не является папкой: {}",
+                path.display()
+            );
+        }
+    }
+    let canonical = directory.canonicalize()?;
+    if canonical
+        .file_name()
+        .is_none_or(|name| !name.eq_ignore_ascii_case(folder))
+    {
+        bail!("Имя папки архива не совпадает с именем в настройках.");
+    }
+    Ok(Some(canonical))
+}
+
+fn verify_archive(directory: &Path, novel: &Novel, history: Vec<&Entry>) -> Result<bool> {
+    let mut covers: HashSet<_> = history
+        .into_iter()
+        .filter_map(|entry| Some((entry.file.file_name()?.to_owned(), entry.bytes)))
+        .collect();
+    let mut files = Vec::new();
+    let mut has_manifest = false;
+    for file in fs::read_dir(directory)? {
+        let file = file?;
+        let path = file.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.is_file() || is_reparse_point(&metadata) {
+            bail!(
+                "В папке архива найден посторонний объект: {}",
+                path.display()
+            );
+        }
+        let name = file.file_name();
+        if name.eq_ignore_ascii_case("archive.json") {
+            let manifest: Manifest = serde_json::from_slice(&fs::read(&path)?)
+                .context("Не удалось прочитать список сохранённых обложек")?;
+            if manifest.version != 1 || manifest.novel_id != novel.id {
+                bail!("Список обложек не соответствует архиву новеллы.");
+            }
+            // The user may have moved an archive. In its manifest the file names
+            // still identify its covers, even if their original root has changed.
+            covers.extend(
+                manifest
+                    .entries
+                    .iter()
+                    .filter(|entry| known_file(entry, novel))
+                    .filter_map(|entry| Some((entry.file.file_name()?.to_owned(), entry.bytes))),
+            );
+            has_manifest = true;
+        } else {
+            files.push((name, metadata.len()));
+        }
+    }
+    if !has_manifest && files.is_empty() {
+        return Ok(false);
+    }
+    for file in files {
+        if !covers.contains(&file) {
+            bail!(
+                "Файл не совпадает с сохранённой обложкой: {}",
+                file.0.to_string_lossy()
+            );
+        }
+    }
+    Ok(true)
+}
+
+fn folders_to_recycle(novel: &Novel, root: &Path) -> Result<Vec<PathBuf>> {
+    if novel.folder.is_empty() {
+        return Ok(Vec::new());
+    }
+    let folder = OsStr::new(&novel.folder);
+    let suffix = format!(" [{}]", novel.id);
+    if novel.id.is_empty()
+        || !novel.id.bytes().all(|b| b.is_ascii_digit())
+        || novel.folder.len() <= suffix.len()
+        || !novel.folder.ends_with(&suffix)
+        || novel
+            .folder
+            .contains(['<', '>', ':', '"', '/', '\\', '|', '?', '*'])
+        || novel.folder.chars().any(|c| c.is_ascii_control())
+    {
+        bail!("Недопустимое имя папки архива.");
+    }
+
+    let mut candidates: BTreeMap<PathBuf, Vec<&Entry>> = BTreeMap::new();
+    if !root.as_os_str().is_empty() {
+        candidates.entry(root.join(folder)).or_default();
+    }
+    for entry in novel
+        .history
+        .iter()
+        .filter(|entry| known_file(entry, novel))
+    {
+        if let Some(parent) = entry.file.parent() {
+            candidates.entry(parent.to_owned()).or_default().push(entry);
+        }
+    }
+
+    let mut directories = BTreeMap::new();
+    for (directory, entries) in candidates {
+        if let Some(canonical) = checked_directory(&directory, folder)
+            .with_context(|| format!("Не удалось проверить папку {}", directory.display()))?
+        {
+            let (_, history) = directories
+                .entry(canonical)
+                .or_insert_with(|| (directory, Vec::new()));
+            history.extend(entries);
+        }
+    }
+    let mut verified = Vec::new();
+    for (directory, history) in directories.into_values() {
+        if verify_archive(&directory, novel, history)
+            .with_context(|| format!("Не удалось проверить папку {}", directory.display()))?
+        {
+            verified.push(directory);
+        }
+    }
+    Ok(verified)
+}
+
+pub fn recycle_folders(novel: &Novel, root: &Path) -> Result<()> {
+    let directories = folders_to_recycle(novel, root)?;
+    if directories.is_empty() {
+        return Ok(());
+    }
+    // Shell file operations require an STA. Use a dedicated thread so this works
+    // independently of the calling thread's COM apartment.
+    std::thread::Builder::new()
+        .spawn(move || recycle_directories(&directories))?
+        .join()
+        .map_err(|_| anyhow::anyhow!("Сбой при перемещении папок архива в корзину."))?
+        .context("Не удалось переместить папки архива в корзину Windows")
+}
+
+fn recycle_directories(directories: &[PathBuf]) -> Result<()> {
+    struct Com;
+    impl Drop for Com {
+        fn drop(&mut self) {
+            // Balances the successful CoInitializeEx on this thread.
+            unsafe { CoUninitialize() };
+        }
+    }
+
+    unsafe {
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
+        let _com = Com;
+        let bin: IShellItem =
+            SHGetKnownFolderItem(&FOLDERID_RecycleBinFolder, KF_FLAG_DEFAULT, None)?;
+        let mut sources = Vec::with_capacity(directories.len());
+        for directory in directories {
+            let path = HSTRING::from(directory.as_os_str());
+            let item: IShellItem = SHCreateItemFromParsingName(&path, None)
+                .with_context(|| format!("Не удалось открыть папку {}", directory.display()))?;
+            let transfer: ITransferSource =
+                item.GetParent()?.BindToHandler(None, &BHID_Transfer)?;
+            sources.push((directory, item, transfer));
+        }
+        // RecycleItem requires a recycle location and returns the recycled item.
+        // Keep this independent of the Shell's general-purpose delete operation.
+        for (index, (directory, item, transfer)) in sources.into_iter().enumerate() {
+            let recycled = transfer.RecycleItem(&item, &bin, TSF_NORMAL.0 as u32);
+            let moved = index + usize::from(recycled.is_ok());
+            recycled
+                .map_err(anyhow::Error::from)
+                .and_then(|_| match fs::symlink_metadata(directory) {
+                    Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+                    Err(e) => Err(e.into()),
+                    Ok(_) => bail!("Папка осталась на диске."),
+                })
+                .with_context(|| {
+                    format!(
+                        "Не удалось завершить операцию с папкой {}. В корзину перемещено {} из {}.",
+                        directory.display(),
+                        moved,
+                        directories.len()
+                    )
+                })?;
+        }
+    }
+    Ok(())
 }
 
 fn content_address(source: &str) -> Option<(String, usize)> {
@@ -304,6 +521,138 @@ impl Archive {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn saved_cover(novel: &Novel, root: &Path) -> Entry {
+        let source = Source {
+            kind: "original".into(),
+            url: "https://images.novelpia.com/imagebox/cover/a.file".into(),
+        };
+        let mut png = Vec::new();
+        PngEncoder::new(&mut png)
+            .write_image(&[7, 0, 0, 255], 1, 1, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        Archive::open(novel, root)
+            .unwrap()
+            .save(novel, &source, &png)
+            .unwrap()
+            .0
+    }
+
+    fn tracked_book() -> Novel {
+        Novel {
+            id: "1".into(),
+            title: "Book".into(),
+            folder: "Book [1]".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn finds_current_manifest_and_older_directory_from_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let previous = temp.path().join("previous");
+        let current = temp.path().join("current");
+        let mut novel = tracked_book();
+        let older_entry = saved_cover(&novel, &previous);
+        let current_entry = saved_cover(&novel, &current);
+        let older_folder = older_entry.file.parent().unwrap().to_owned();
+        let current_folder = current_entry.file.parent().unwrap().to_owned();
+        fs::remove_file(older_folder.join("archive.json")).unwrap();
+        novel.history.push(older_entry);
+
+        let found: HashSet<_> = folders_to_recycle(&novel, &current)
+            .unwrap()
+            .into_iter()
+            .collect();
+        assert_eq!(found, HashSet::from([older_folder, current_folder]));
+    }
+
+    #[test]
+    fn ignores_missing_directory_without_creating_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let novel = tracked_book();
+
+        assert!(folders_to_recycle(&novel, temp.path()).unwrap().is_empty());
+        assert!(!temp.path().join(&novel.folder).exists());
+    }
+
+    #[test]
+    fn skips_empty_current_directory_when_older_archive_exists() {
+        let temp = tempfile::tempdir().unwrap();
+        let previous = temp.path().join("previous");
+        let current = temp.path().join("current");
+        let mut novel = tracked_book();
+        let entry = saved_cover(&novel, &previous);
+        let older_folder = entry.file.parent().unwrap().to_owned();
+        novel.history.push(entry);
+        let empty = current.join(&novel.folder);
+        fs::create_dir_all(&empty).unwrap();
+
+        assert_eq!(
+            folders_to_recycle(&novel, &current).unwrap(),
+            [older_folder]
+        );
+        assert!(empty.is_dir());
+    }
+
+    #[test]
+    fn rejects_mixed_folder_with_unlisted_png() {
+        let temp = tempfile::tempdir().unwrap();
+        let novel = tracked_book();
+        let entry = saved_cover(&novel, temp.path());
+        let unlisted = entry
+            .file
+            .with_file_name(format!("My cover_{}.png", entry.hash));
+        fs::copy(&entry.file, &unlisted).unwrap();
+
+        assert!(folders_to_recycle(&novel, temp.path()).is_err());
+        assert!(unlisted.is_file());
+    }
+
+    #[test]
+    fn rejects_manifest_for_different_novel() {
+        let temp = tempfile::tempdir().unwrap();
+        let novel = tracked_book();
+        let entry = saved_cover(&novel, temp.path());
+        let path = entry.file.with_file_name("archive.json");
+        let mut manifest: Manifest = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        manifest.novel_id = "2".into();
+        fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        assert!(folders_to_recycle(&novel, temp.path()).is_err());
+    }
+
+    #[test]
+    fn rejects_folder_path_with_parent_traversal() {
+        let temp = tempfile::tempdir().unwrap();
+        let novel = Novel {
+            folder: "../Book [1]".into(),
+            ..tracked_book()
+        };
+
+        assert!(folders_to_recycle(&novel, temp.path()).is_err());
+    }
+
+    #[test]
+    fn rejects_directory_junction_in_archive_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let real_root = temp.path().join("real");
+        let junction = temp.path().join("junction");
+        let novel = tracked_book();
+        let entry = saved_cover(&novel, &real_root);
+        let result = std::process::Command::new("cmd")
+            .args(["/d", "/c", "mklink", "/j"])
+            .arg(&junction)
+            .arg(&real_root)
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{:?}", result);
+
+        let result = folders_to_recycle(&novel, &junction);
+        fs::remove_dir(&junction).unwrap();
+        assert!(result.is_err());
+        assert!(entry.file.is_file());
+    }
 
     #[test]
     fn keeps_legacy_png_for_verified_source_alias_but_detects_replacement() {

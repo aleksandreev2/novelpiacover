@@ -7,24 +7,42 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
+    <!-- Adapted Lucide and Feather icons. See ICONS-LICENSE.txt. -->
+    <svg xmlns="http://www.w3.org/2000/svg" class="icon-library" aria-hidden="true">
+      <symbol id="icon-book" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" /></symbol>
+      <symbol id="icon-books" viewBox="0 0 24 24"><rect width="8" height="18" x="3" y="3" rx="1" /><path d="M7 3v18m4-1 7-16 4 2-7 16z" /></symbol>
+      <symbol id="icon-grid" viewBox="0 0 24 24"><rect width="7" height="7" x="3" y="3" rx="1" /><rect width="7" height="7" x="14" y="3" rx="1" /><rect width="7" height="7" x="14" y="14" rx="1" /><rect width="7" height="7" x="3" y="14" rx="1" /></symbol>
+      <symbol id="icon-list" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /></symbol>
+      <symbol id="icon-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></symbol>
+      <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></symbol>
+      <symbol id="icon-minus" viewBox="0 0 24 24"><path d="M5 12h14" /></symbol>
+      <symbol id="icon-settings" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.09a2 2 0 0 1-1-1.74v-.51a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" /><circle cx="12" cy="12" r="3" /></symbol>
+      <symbol id="icon-pause" viewBox="0 0 24 24"><rect width="4" height="16" x="6" y="4" rx="1" /><rect width="4" height="16" x="14" y="4" rx="1" /></symbol>
+      <symbol id="icon-play" viewBox="0 0 24 24"><path d="M6 4.75v14.5a1 1 0 0 0 1.55.83l11-7.25a1 1 0 0 0 0-1.66l-11-7.25A1 1 0 0 0 6 4.75z" /></symbol>
+      <symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5" /><path d="M20 12a8 8 0 0 0-14-5M4 12a8 8 0 0 0 14 5" /></symbol>
+      <symbol id="icon-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></symbol>
+      <symbol id="icon-close" viewBox="0 0 24 24"><path d="m18 6-12 12M6 6l12 12" /></symbol>
+      <symbol id="icon-image" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /><circle cx="9" cy="9" r="2" /><path d="m21 15-4.35-4.35a2 2 0 0 0-2.83 0L5 19.5" /></symbol>
+      <symbol id="icon-pencil" viewBox="0 0 24 24"><path d="m15 5 4 4M4 20l4.5-1 12-12a2.8 2.8 0 0 0-4-4l-12 12z" /></symbol>
+      <symbol id="icon-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14m-7-7 7 7-7 7" /></symbol>
+      <symbol id="icon-external" viewBox="0 0 24 24"><path d="M15 3h6v6m0-6-9 9" /><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /></symbol>
+      <symbol id="icon-bell" viewBox="0 0 24 24"><path d="M10 21h4m-9-4c1.3-1.4 2-2.6 2-7a5 5 0 0 1 10 0c0 4.4.7 5.6 2 7z" /></symbol>
+      <symbol id="icon-remove" viewBox="0 0 24 24"><path d="M4 6h16M10 6V3h4v3m4 0-1 14H7L6 6m4 4v6m4-6v6" /></symbol>
+    </svg>
     <div class="app">
       <aside class="sidebar">
         <div class="brand">
-          <span class="brand-icon" aria-hidden="true">▤</span>
+          <span class="brand-icon"><svg class="icon" aria-hidden="true"><use href="#icon-books" /></svg></span>
           <div><strong>Novelpia</strong><span>Обложки и статусы</span></div>
         </div>
-        <button id="add" class="primary">＋ Добавить новеллу</button>
+        <button id="add" class="primary icon-label"><svg class="icon" aria-hidden="true"><use href="#icon-plus" /></svg><span>Добавить новеллу</span></button>
         <nav class="sidebar-nav" aria-label="Разделы архива">
           <button id="collection-nav" class="nav-button" aria-current="page">
-            <svg viewBox="0 0 20 20" aria-hidden="true">
-              <path d="M3 3.5h5.5v5.5H3zm8.5 0H17v5.5h-5.5zM3 12h5.5v5.5H3zm8.5 0H17v5.5h-5.5z" />
-            </svg>
+            <svg class="icon" aria-hidden="true"><use href="#icon-grid" /></svg>
             <span>Коллекция</span>
           </button>
           <button id="activity-nav" class="nav-button" aria-current="false">
-            <svg viewBox="0 0 20 20" aria-hidden="true">
-              <circle cx="10" cy="10" r="7" /><path d="M10 5.5V10l3 2" />
-            </svg>
+            <svg class="icon" aria-hidden="true"><use href="#icon-clock" /></svg>
             <span>Последние события</span>
             <span id="activity-badge" class="activity-badge" hidden>0</span>
           </button>
@@ -37,17 +55,21 @@
           <span>Наблюдение</span><span id="novel-count">0</span>
         </div>
         <nav id="novels" aria-label="Список новелл"></nav>
+        <p id="sidebar-empty" class="muted" hidden></p>
         <div class="sidebar-bottom">
-          <button id="settings" class="plain">⚙ Настройки</button>
+          <button id="settings" class="plain icon-label"><svg class="icon" aria-hidden="true"><use href="#icon-settings" /></svg><span>Настройки</span></button>
           <p>Закрытие окна сворачивает<br />приложение в трей.</p>
         </div>
       </aside>
       <main>
         <header class="toolbar">
-          <div id="monitor-status" class="status-pill">Наблюдение включено</div>
+          <div id="monitor-status" class="status-pill">
+            <span id="monitor-label" role="status">Наблюдение включено</span>
+            <span id="check-progress" class="check-progress" hidden></span>
+          </div>
           <div class="toolbar-actions">
-            <button id="pause" class="plain">Пауза</button
-            ><button id="check-all">Проверить все</button>
+            <button id="pause" class="plain icon-label"><svg class="icon" aria-hidden="true"><use href="#icon-pause" /></svg><span id="pause-label">Пауза</span></button>
+            <button id="check-all" class="icon-label"><svg class="icon" aria-hidden="true"><use href="#icon-refresh" /></svg><span>Проверить все</span></button>
           </div>
         </header>
         <div id="recovery" class="notice" hidden>
@@ -64,14 +86,10 @@
             <h1 id="collection-heading" tabindex="-1">Коллекция</h1>
             <div class="collection-layout" role="group" aria-label="Вид коллекции">
               <button id="collection-grid" type="button" aria-pressed="true" aria-label="Сетка" title="Сетка">
-                <svg viewBox="0 0 20 20" aria-hidden="true">
-                  <path d="M3 3.5h5.5v5.5H3zm8.5 0H17v5.5h-5.5zM3 12h5.5v5.5H3zm8.5 0H17v5.5h-5.5z" />
-                </svg>
+                <svg class="icon" aria-hidden="true"><use href="#icon-grid" /></svg>
               </button>
               <button id="collection-list" type="button" aria-pressed="false" aria-label="Список" title="Список">
-                <svg viewBox="0 0 20 20" aria-hidden="true">
-                  <path d="M7 5h10M7 10h10M7 15h10M3 5h.1M3 10h.1M3 15h.1" />
-                </svg>
+                <svg class="icon" aria-hidden="true"><use href="#icon-list" /></svg>
               </button>
             </div>
           </header>
@@ -124,7 +142,7 @@
             <span id="activity-count" class="muted" role="status"></span>
           </div>
           <div id="activity-empty" class="activity-empty" hidden>
-            <span aria-hidden="true">◷</span>
+            <svg class="icon" aria-hidden="true"><use href="#icon-clock" /></svg>
             <h2 id="activity-empty-title">Пока нет событий</h2>
             <p id="activity-empty-text">Здесь появятся новые обложки, смены статуса и другие изменения тайтлов.</p>
           </div>
@@ -133,7 +151,7 @@
           <p class="activity-footnote">Хранятся последние 500 событий. Время — момент обнаружения изменения. События «Из истории» перенесены из вашего архива.</p>
         </section>
         <section id="empty" class="empty">
-          <div class="empty-art" aria-hidden="true">▤</div>
+          <div class="empty-art"><svg class="icon" aria-hidden="true"><use href="#icon-books" /></svg></div>
           <h1 id="empty-heading" tabindex="-1">Сохраните историю обложек</h1>
           <p>
             Добавьте новеллу — её текущая обложка и новые версии будут
@@ -154,7 +172,7 @@
               aria-label="Убрать новеллу из наблюдения"
               title="Убрать из наблюдения"
             >
-              ×
+              <svg class="icon" aria-hidden="true"><use href="#icon-remove" /></svg>
             </button>
           </div>
           <div class="overview">
@@ -190,9 +208,9 @@
                 </div>
               </dl>
               <div class="novel-actions">
-                <button id="check-one" class="primary">Проверить сейчас</button
-                ><button id="open-site">Страница новеллы</button
-                ><button id="novel-notifications">Уведомления…</button>
+                <button id="check-one" class="primary icon-label"><svg class="icon" aria-hidden="true"><use href="#icon-refresh" /></svg><span id="check-one-label">Проверить сейчас</span></button>
+                <button id="open-site" class="icon-label"><svg class="icon" aria-hidden="true"><use href="#icon-external" /></svg><span>Страница новеллы</span></button>
+                <button id="novel-notifications" class="icon-label"><svg class="icon" aria-hidden="true"><use href="#icon-bell" /></svg><span>Уведомления…</span></button>
               </div>
               <p id="status-read-warning" class="field-help" hidden>
                 Сейчас статус не распознан. Показан последний известный;
@@ -207,6 +225,10 @@
             <ol id="status-history"></ol>
             <button id="status-more" hidden>Показать ещё</button>
           </details>
+          <details id="title-history-panel" class="status-history title-history" hidden>
+            <summary id="title-history-summary">История названий</summary>
+            <ol id="title-history"></ol>
+          </details>
           <div class="history-heading">
             <h2>История обложек</h2>
             <span id="history-count"></span>
@@ -219,9 +241,10 @@
           <button id="more" hidden>Показать ещё</button>
         </section>
         <footer>
-          <button id="root" class="path-button" title="Открыть папку архива">
-            Выберите папку архива</button
-          ><span id="interval-label">Каждые 30 минут</span>
+          <button id="root" class="path-button icon-label" title="Открыть папку архива">
+            <svg class="icon" aria-hidden="true"><use href="#icon-folder" /></svg><span id="root-path">Выберите папку архива</span>
+          </button>
+          <span id="interval-label">Каждые 30 минут</span>
         </footer>
       </main>
     </div>
@@ -234,12 +257,11 @@
             class="close-dialog icon-button"
             aria-label="Закрыть"
           >
-            ×
+            <svg class="icon" aria-hidden="true"><use href="#icon-close" /></svg>
           </button>
         </div>
         <p class="muted">
-          Вставьте ссылку на страницу Novelpia. Текущие обложки сохранятся
-          сразу.
+          Вставьте ссылку на страницу Novelpia. Приложение сохранит обложки при первой проверке.
         </p>
         <label
           >Ссылка на новеллу<input
@@ -258,7 +280,7 @@
         <div class="dialog-actions">
           <button type="button" class="close-dialog">Отмена</button
           ><button type="submit" class="primary" id="add-submit">
-            Добавить и сохранить
+            Добавить
           </button>
         </div>
       </form>
@@ -272,7 +294,7 @@
             class="close-dialog icon-button"
             aria-label="Закрыть"
           >
-            ×
+            <svg class="icon" aria-hidden="true"><use href="#icon-close" /></svg>
           </button>
         </div>
         <label>Тема оформления
@@ -370,7 +392,7 @@
             class="close-dialog icon-button"
             aria-label="Закрыть"
           >
-            ×
+            <svg class="icon" aria-hidden="true"><use href="#icon-close" /></svg>
           </button>
         </div>
         <p id="policy-title" class="muted"></p>
@@ -410,16 +432,18 @@
         </div>
       </form>
     </dialog>
-    <dialog id="remove-dialog">
+    <dialog id="remove-dialog" aria-labelledby="remove-heading" aria-describedby="remove-title">
       <form id="remove-form">
-        <h2>Прекратить наблюдение?</h2>
-        <p>
-          Сохранённые PNG останутся на диске. Если добавить эту новеллу снова,
-          история восстановится.
-        </p>
+        <h2 id="remove-heading">Прекратить наблюдение?</h2>
+        <p id="remove-title" class="muted"></p>
+        <label class="checkbox remove-option">
+          <input id="remove-archive" type="checkbox" />
+          <span>Также переместить папки архива тайтла в корзину Windows</span>
+        </label>
+        <p id="remove-error" class="form-error" role="alert"></p>
         <div class="dialog-actions">
-          <button type="button" class="close-dialog">Отмена</button
-          ><button type="submit" class="danger">Убрать из списка</button>
+          <button type="button" class="close-dialog" autofocus>Отмена</button>
+          <button type="submit" id="remove-submit" class="danger">Убрать из списка</button>
         </div>
       </form>
     </dialog>

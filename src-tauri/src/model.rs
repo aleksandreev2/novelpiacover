@@ -121,6 +121,13 @@ pub struct Transition {
     pub at: String,
 }
 
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rename {
+    pub from: String,
+    pub to: String,
+    pub at: String,
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Novel {
@@ -142,6 +149,7 @@ pub struct Novel {
     pub status_reason: String,
     pub status_observed_at: Option<String>,
     pub status_history: Vec<Transition>,
+    pub title_history: Vec<Rename>,
     pub status_notifications: Option<Policy>,
 }
 
@@ -178,6 +186,7 @@ pub struct Activity {
     pub initial: bool,
     pub imported: bool,
     pub resumed: bool,
+    pub archive_deleted: bool,
 }
 
 impl Activity {
@@ -256,6 +265,23 @@ impl Profile {
     fn upgrade(&mut self) {
         let mut events = Vec::new();
         let mut seen = HashSet::new();
+        let mut renames = BTreeMap::<&str, Vec<Rename>>::new();
+        for event in self
+            .activity
+            .iter()
+            .filter(|event| event.kind == "title_renamed")
+        {
+            let (Some(from), Some(to)) = (&event.from, &event.to) else {
+                continue;
+            };
+            if from != to && !from.is_empty() && !to.is_empty() && timestamp(&event.at).is_some() {
+                renames.entry(&event.novel_id).or_default().push(Rename {
+                    from: from.clone(),
+                    to: to.clone(),
+                    at: event.at.clone(),
+                });
+            }
+        }
         if self.status_policy_version < 2 {
             self.status_notifications.upgrade();
         }
@@ -267,6 +293,17 @@ impl Profile {
             }
             let mut hashes = HashSet::new();
             let mut dates = Vec::new();
+            if let Some(history) = renames.get(novel.id.as_str()) {
+                for rename in history {
+                    if !novel.title_history.contains(rename) {
+                        novel.title_history.push(rename.clone());
+                    }
+                }
+                novel
+                    .title_history
+                    .sort_by_key(|rename| timestamp(&rename.at));
+            }
+            dates.extend(novel.title_history.iter().map(|rename| rename.at.clone()));
             let import = self.activity_version == 0 && seen.insert(novel.id.clone());
             for entry in &novel.history {
                 if hashes.insert(&entry.hash) && timestamp(&entry.saved_at).is_some() {
@@ -383,6 +420,46 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imports_renames_before_the_global_activity_log_rolls_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let before = "초월자들이 집착하는 성지의 주인이 되었다";
+        let after = "초월자들을 타락시키는 모텔 주인이 되었다";
+        let settings = serde_json::json!({
+            "version": 1, "novels": [{"id": "1", "title": after}], "retired": {},
+            "activityVersion": 1, "activitySequence": 1,
+            "activity": [{"type": "title_renamed", "novelId": "1", "title": after,
+                "from": before, "to": after, "at": "2026-11-12T00:00:00Z", "sequence": 1}]
+        });
+        fs::write(
+            dir.path().join("settings.json"),
+            serde_json::to_vec(&settings).unwrap(),
+        )
+        .unwrap();
+        let mut store = Store::open(dir.path().to_owned()).unwrap();
+        store
+            .update(|profile| {
+                let novel = profile.novels[0].clone();
+                profile.append(
+                    (0..=ACTIVITY_LIMIT)
+                        .map(|_| Activity::new(&novel, "cover_saved", now()))
+                        .collect(),
+                );
+                Ok(())
+            })
+            .unwrap();
+        let store = Store::open(dir.path().to_owned()).unwrap();
+        assert!(store
+            .profile
+            .activity
+            .iter()
+            .all(|e| e.kind != "title_renamed"));
+        let history = &store.profile.novels[0].title_history;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].from, before);
+        assert_eq!(history[0].to, after);
+    }
 
     #[test]
     fn migrates_legacy_titles_and_retired_covers_without_unread_events() {
