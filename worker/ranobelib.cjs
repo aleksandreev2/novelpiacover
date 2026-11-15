@@ -10,6 +10,8 @@ const TEAM_URL = WEB_ORIGIN + TEAM_PATH;
 const SITE_ID = '3';
 const MINUTE = 60_000;
 const DAY = 24 * 60 * MINUTE;
+// Leave room in the API quota for the browser's own requests.
+const REQUEST_SPACING_MS = 1_150;
 const POSITIVE_ID = /^[1-9]\d*$/;
 const SLUG = /^[\p{L}\p{N}_-]{1,250}$/u;
 const MESSAGES = {
@@ -51,33 +53,46 @@ async function readAll(get, url, paginated = false) {
 	const rows = [];
 	let pageCount;
 	let total;
-	for (let page = 1; ; page++) {
+	let seed;
+	for (let page = 1; page <= 100; page++) {
 		const requestUrl = new URL(url);
 		if (paginated || page > 1) requestUrl.searchParams.set('page', String(page));
+		if (seed) requestUrl.searchParams.set('seed', seed);
 		const result = await get(requestUrl);
 		if (!Array.isArray(result?.data)) throw new WorkerError('schema');
 		rows.push(...result.data);
-		const hasPageInfo = result.meta?.current_page !== undefined || result.meta?.last_page !== undefined;
+		const meta = result.meta;
+		const hasPageInfo = meta?.current_page !== undefined || meta?.last_page !== undefined || meta?.has_next_page !== undefined;
 		if (!paginated && !hasPageInfo && result.links?.next == null) return rows;
-		const currentPage = safeId(result.meta?.current_page);
-		const lastPage = safeId(result.meta?.last_page);
-		if (currentPage !== page || lastPage > 100 || page > lastPage || (pageCount && pageCount !== lastPage)) {
-			throw new WorkerError('schema');
+		if (safeId(meta?.current_page) !== page) throw new WorkerError('schema');
+
+		let hasNext = meta.has_next_page;
+		if (meta.last_page !== undefined) {
+			const lastPage = safeId(meta.last_page);
+			if (lastPage > 100 || page > lastPage || (pageCount && pageCount !== lastPage)) {
+				throw new WorkerError('schema');
+			}
+			if (hasNext !== undefined && hasNext !== (page < lastPage)) throw new WorkerError('schema');
+			pageCount = lastPage;
+			hasNext = page < lastPage;
 		}
-		pageCount = lastPage;
-		if (result.meta.total !== undefined) {
-			const currentTotal = Number(result.meta.total);
+		if (typeof hasNext !== 'boolean') throw new WorkerError('schema');
+		// Keep the ordering from page one and build every URL with the original filters.
+		if (page === 1 && paginated && typeof meta.seed === 'string' && meta.seed) seed = meta.seed;
+		if (meta.total !== undefined) {
+			const currentTotal = Number(meta.total);
 			if (!Number.isSafeInteger(currentTotal) || currentTotal < 0 || (total !== undefined && total !== currentTotal)) {
 				throw new WorkerError('schema');
 			}
 			total = currentTotal;
 		}
-		if (page === lastPage) {
+		if ((hasNext || page > 1) && result.data.length === 0) throw new WorkerError('schema');
+		if (!hasNext) {
 			if (total !== undefined && total !== rows.length) throw new WorkerError('schema');
 			return rows;
 		}
-		if (result.data.length === 0) throw new WorkerError('schema');
 	}
+	throw new WorkerError('schema');
 }
 
 async function readCatalog(get, status) {
@@ -107,20 +122,22 @@ function publicationTime(value) {
 	return millis;
 }
 
+function teamIds(record) {
+	if (!Array.isArray(record.teams)) throw new WorkerError('schema');
+	return record.teams.map(team => safeId(team?.id));
+}
+
 async function readObservation(get, item, now) {
 	const branchRows = await readAll(get, new URL(`/api/branches/${item.id}`, API_ORIGIN));
-	const ourBranches = new Set();
-	const branchIds = new Set();
+	const branchTeams = new Map();
 	let shared = false;
 	for (const row of branchRows) {
 		const id = safeId(row?.id);
-		if (!Array.isArray(row.teams) || branchIds.has(id)) throw new WorkerError('schema');
-		branchIds.add(id);
-		const teamIds = new Set(row.teams.map(team => safeId(team?.id)));
-		if (teamIds.has(TEAM_ID)) ourBranches.add(id);
-		if ([...teamIds].some(teamId => teamId !== TEAM_ID)) shared = true;
+		if (branchTeams.has(id)) throw new WorkerError('schema');
+		const teams = teamIds(row);
+		branchTeams.set(id, teams);
+		if (teams.some(id => id !== TEAM_ID)) shared = true;
 	}
-	if (ourBranches.size === 0) throw new WorkerError('schema', 'В списке веток не найдена ветка команды.');
 
 	const chapterRows = await readAll(get, new URL(`/api/manga/${encodeURIComponent(item.slug)}/chapters`, API_ORIGIN));
 	let ownsChapters = false;
@@ -131,9 +148,12 @@ async function readObservation(get, item, now) {
 		const chapterId = safeId(row?.id);
 		if (!Array.isArray(row.branches) || row.branches.length === 0) throw new WorkerError('schema');
 		for (const branch of row.branches) {
-			const branchId = safeId(branch?.branch_id);
-			if (!branchIds.has(branchId)) throw new WorkerError('schema');
-			if (!ourBranches.has(branchId)) continue;
+			// RanobeLIB stores team attribution on the chapter when it has no separate branch.
+			const unbranched = branch?.branch_id === null;
+			const teams = unbranched ? teamIds(branch) : branchTeams.get(safeId(branch?.branch_id));
+			if (!teams) throw new WorkerError('schema');
+			if (unbranched && teams.some(id => id !== TEAM_ID)) shared = true;
+			if (!teams.includes(TEAM_ID)) continue;
 			ownsChapters = true;
 			const time = publicationTime(branch.publish_at);
 			if (time === undefined) continue;
@@ -145,7 +165,7 @@ async function readObservation(get, item, now) {
 			}
 		}
 	}
-	if (!ownsChapters) throw new WorkerError('schema', 'В списке глав не найдена ветка команды.');
+	if (!ownsChapters) throw new WorkerError('schema', 'В списке не найдены главы команды.');
 
 	return {
 		state: 'known',
@@ -373,7 +393,7 @@ async function runBrowser(command, profilePath, request, signal) {
 						delay = nextRequestAt - Date.now();
 					}
 					signal.throwIfAborted();
-					nextRequestAt = Date.now() + 180;
+					nextRequestAt = Date.now() + REQUEST_SPACING_MS;
 					return context.request.get(url.href, {
 						headers: {
 							accept: 'application/json',

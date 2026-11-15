@@ -2,7 +2,7 @@
 
 Приложение для Windows 10/11 x64. Следит за обложками, статусами и названиями тайтлов Novelpia и сохраняет PNG в выбранную папку.
 
-**[Скачать установщик 2.2.0](https://github.com/aleksandreev2/novelpiacover/releases/download/v2.2.0/NovelpiaCoverArchive-Setup-2.2.0.exe)** · [Все релизы](https://github.com/aleksandreev2/novelpiacover/releases)
+**[Скачать установщик 2.2.1](https://github.com/aleksandreev2/novelpiacover/releases/download/v2.2.1/NovelpiaCoverArchive-Setup-2.2.1.exe)** · [Все релизы](https://github.com/aleksandreev2/novelpiacover/releases)
 
 Запустите установочный EXE. Он создаёт ярлыки на рабочем столе и в меню «Пуск» и открывает приложение. Тем же EXE можно обновить установленную версию. Список тайтлов, настройки и файлы архива сохраняются. При необходимости установщик загрузит среду WebView2 от Microsoft.
 

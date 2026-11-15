@@ -84,6 +84,40 @@ test('paginates both catalog filters and only reads chapter lists for due ongoin
 	assert.equal(result.items[1].observation, undefined);
 });
 
+test('reads RanobeLIB has_next_page catalog and keeps its seed across active pages', async () => {
+	const seed = 'd90d65203d3233a6a4af4a81b3e255cb';
+	const active = Array.from({ length: 76 }, (_, index) => title(index + 1));
+	const completed = Array.from({ length: 55 }, (_, index) => title(index + 100));
+	const calls = [];
+	const get = async url => {
+		if (url.pathname !== '/api/manga') assert.fail('Only catalog requests should be due');
+		assert.equal(url.origin, 'https://api.cdnlibs.org');
+		assert.equal(url.searchParams.get('target_id'), '11969');
+		assert.equal(url.searchParams.get('site_id[0]'), '3');
+		const status = url.searchParams.get('scanlate_status[0]');
+		const page = Number(url.searchParams.get('page'));
+		const hasNext = status === '1' && page === 1;
+		assert.equal(url.searchParams.get('seed'), page === 2 ? seed : null);
+		calls.push([status, page]);
+		return {
+			data: status === '1' ? active.slice((page - 1) * 60, page * 60) : completed,
+			links: { next: hasNext ? 'http://api.cdnlibs.org/api/manga?page=2' : null },
+			meta: {
+				current_page: page,
+				page,
+				has_next_page: hasNext,
+				per_page: 60,
+				seed: page === 1 ? seed : 'c1b774653c3a4b38838ddb5edc582d7c',
+			},
+		};
+	};
+	const known = active.map(({ id }) => ({ id, status: 'ongoing', nextCheckAt: later }));
+	const { items } = await scanTeam(get, { known, force: false }, now);
+	assert.deepEqual(calls, [['1', 1], ['1', 2], ['2', 1]]);
+	assert.deepEqual(items.map(item => item.id), [...active, ...completed].map(item => item.id));
+	assert.equal(items.filter(item => item.status === 'completed').length, 55);
+});
+
 test('counts future chapters once across team branches and flags a shared team branch', async () => {
 	const { get } = fixture({
 		branches: { 11: records([branch(5, 11969), branch(6, 11969, 10), branch(7, 10)]) },
@@ -116,11 +150,42 @@ test('flags a title with a different team on a separate branch', async () => {
 	assert.equal(observation.shared, true);
 });
 
+test('counts team chapters published without a separate branch and excludes other teams', async () => {
+	const ours = { id: 11969 };
+	const other = { id: 10 };
+	const { get } = fixture({
+		branches: { 11: records([]) },
+		chapters: { 11: records([
+			{ id: 101, branches: [{ branch_id: null, teams: [ours], publish_at: later }] },
+			{ id: 102, branches: [{ branch_id: null, teams: [other], publish_at: later }] },
+			{ id: 103, branches: [{ branch_id: null, teams: [ours], publish_at: earlier }] },
+		]) },
+	});
+	const { items: [{ observation }] } = await scanTeam(get, { known: [], force: false }, now);
+	assert.equal(observation.state, 'known');
+	assert.equal(observation.scheduled, 1);
+	assert.equal(observation.shared, true);
+});
+
+test('combines identified branches with chapters attributed directly to the team', async () => {
+	const { get } = fixture({
+		chapters: { 11: records([
+			chapter(101, [5, later]),
+			{ id: 102, branches: [{ branch_id: null, teams: [{ id: 11969 }], publish_at: later }] },
+		]) },
+	});
+	const { items: [{ observation }] } = await scanTeam(get, { known: [], force: false }, now);
+	assert.equal(observation.state, 'known');
+	assert.equal(observation.scheduled, 2);
+	assert.equal(observation.shared, false);
+});
+
 test('marks missing ownership, malformed timestamps, and incomplete chapter pages unknown', async t => {
 	const cases = {
 		'no team branch': { branches: { 11: records([branch(5, 10)]) } },
 		'no chapter carrying a team branch': { chapters: { 11: records([chapter(101, [6, later])]) } },
 		'empty chapter list': { chapters: { 11: records([]) } },
+		'no attribution on unbranched chapter': { chapters: { 11: records([chapter(101, [null, later])]) } },
 		'invalid publication timestamp': { chapters: { 11: records([chapter(101, [5, 'invalid'])]) } },
 		'advertised second page unavailable': { chapters: { 11: listing([chapter(101, [5, earlier])], 1, 2) } },
 	};
