@@ -12,6 +12,11 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.18.0'
+      - run: npm ci --ignore-scripts
+      - run: npm test
       - run: rustup toolchain install stable --profile minimal --component rustfmt
       - run: cargo +stable fmt --check --manifest-path src-tauri/Cargo.toml
       - run: cargo +stable test --locked --manifest-path src-tauri/Cargo.toml

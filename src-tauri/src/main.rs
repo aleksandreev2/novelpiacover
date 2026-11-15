@@ -5,6 +5,7 @@ mod desktop;
 mod model;
 mod monitor;
 mod novelpia;
+mod ranobelib;
 
 fn main() {
     if let Err(error) = desktop::run() {

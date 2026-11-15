@@ -1,7 +1,7 @@
 {
   "name": "novelpia-cover-archive",
   "productName": "Novelpia Cover Archive",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "description": "Архив обложек Novelpia и Windows-уведомления о статусах тайтлов",
   "repository": {
     "type": "git",
@@ -11,9 +11,13 @@
   "license": "MIT",
   "private": true,
   "scripts": {
-    "installer": "node scripts/installer.cjs"
+    "installer": "node scripts/installer.cjs",
+    "test": "node --test-isolation=none --test worker/ranobelib.test.cjs"
   },
   "devDependencies": {
     "electron-builder": "26.18.0"
+  },
+  "dependencies": {
+    "playwright-core": "1.64.1"
   }
 }

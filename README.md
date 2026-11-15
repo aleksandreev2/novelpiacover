@@ -2,7 +2,7 @@
 
 Приложение для Windows 10/11 x64. Следит за обложками, статусами и названиями тайтлов Novelpia и сохраняет PNG в выбранную папку.
 
-**[Скачать установщик 2.1.1](https://github.com/aleksandreev2/novelpiacover/releases/download/v2.1.1/NovelpiaCoverArchive-Setup-2.1.1.exe)** · [Все релизы](https://github.com/aleksandreev2/novelpiacover/releases)
+**[Скачать установщик 2.2.0](https://github.com/aleksandreev2/novelpiacover/releases/download/v2.2.0/NovelpiaCoverArchive-Setup-2.2.0.exe)** · [Все релизы](https://github.com/aleksandreev2/novelpiacover/releases)
 
 Запустите установочный EXE. Он создаёт ярлыки на рабочем столе и в меню «Пуск» и открывает приложение. Тем же EXE можно обновить установленную версию. Список тайтлов, настройки и файлы архива сохраняются. При необходимости установщик загрузит среду WebView2 от Microsoft.
 
@@ -27,15 +27,24 @@
 
 Профиль находится в `%APPDATA%/Novelpia Cover Archive`. Резервная копия настроек сохраняется в `settings.json.bak`. Переменная `NOVELPIA_PROFILE` позволяет использовать отдельный абсолютный путь. Профиль и архив хранятся локально.
 
+## RanobeLIB
+
+1. Откройте **RanobeLIB** и нажмите **Войти в RanobeLIB**. Используйте аккаунт с доступом к управлению командой «Дом Некроманта». Сессия хранится в выделенном браузерном профиле приложения.
+2. Нажмите **Запустить проверку** или включите **Автоматические проверки**. Приложение загружает продолжающиеся и завершённые переводы команды. Для продолжающихся оно считает будущие публикации в ветках команды.
+3. Поставьте локальную отметку **Финальные главы загружены** после загрузки финала. Приложение покажет готовность, когда подтвердит отсутствие отложенных глав. Совместные проекты требуют отдельной проверки.
+
+RanobeLIB работает в режиме наблюдения. Статусы на сайте меняются вручную. Работает с установленным Microsoft Edge или Google Chrome. Помощник Playwright и Node.js входят в установщик.
+
 ## Сборка
 
-Rust и Tauri обслуживают мониторинг, архив, трей и уведомления. Интерфейс HTML, CSS и JavaScript отображается в системном WebView2. Для разработки нужны [средства сборки Rust для Windows](https://v2.tauri.app/start/prerequisites/) и Node.js для сборки NSIS.
+Rust и Tauri обслуживают мониторинг, архив, трей и уведомления. Интерфейс HTML, CSS и JavaScript отображается в системном WebView2. Для разработки нужны [средства сборки Rust для Windows](https://v2.tauri.app/start/prerequisites/) и официальный Node.js 24.18.0 для Windows x64.
 
 ```powershell
 cargo test --locked --manifest-path src-tauri/Cargo.toml
 cargo build --release --locked --manifest-path src-tauri/Cargo.toml
 node scripts/smoke-windows.cjs
 npm ci --ignore-scripts
+npm test
 curl.exe --fail --location 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' --output assets/WebView2Setup.exe
 Get-AuthenticodeSignature assets/WebView2Setup.exe
 npm run installer

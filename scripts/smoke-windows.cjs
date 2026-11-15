@@ -102,6 +102,38 @@ async function stop() {
   child = null;
 }
 
+async function ranobeFixture(profile) {
+  const checkedAt = new Date().toISOString();
+  const nextCheckAt = new Date(Date.now() + 3_600_000).toISOString();
+  const observation = { state: "known", scheduled: 0, checkedAt, nextCheckAt, shared: false };
+  await fs.writeFile(path.join(profile, "ranobelib.json"), JSON.stringify({
+    connected: true,
+    lastScanAt: checkedAt,
+    nextScanAt: nextCheckAt,
+    titles: [
+      { id: 41, slug: "41--final", title: "Финальный тайтл", status: "ongoing", observation },
+      { id: 42, slug: "42--shared", title: "Совместный тайтл", status: "ongoing",
+        observation: { ...observation, shared: true } },
+      { id: 43, slug: "43--complete", title: "Завершённый тайтл", status: "completed" },
+      { id: 44, slug: "44--unknown", title: "Непроверенный тайтл", status: "ongoing" },
+    ],
+    finalLoaded: [42],
+  }));
+}
+
+async function checkRanobeCatalogue() {
+  await evaluate("document.querySelector('#ranobe-nav').click()");
+  await until(() => evaluate("!document.querySelector('#ranobe-view').hidden && document.querySelector('#ranobe-total').textContent === '4'"), "RanobeLIB catalogue did not open");
+  assert.equal(await evaluate("document.querySelector('#ranobe-completed').textContent"), "1");
+  assert.equal(await evaluate("document.querySelector('[data-key=\"44\"] .ranobe-scheduled').textContent"), "Нет данных");
+  assert.equal(await evaluate("document.querySelector('[data-key=\"42\"] .ranobe-ready').hidden"), true);
+  await evaluate("document.querySelector('[data-key=\"41\"] input').click()");
+  await until(() => evaluate("!document.querySelector('[data-key=\"41\"] .ranobe-ready').hidden"), "Final mark did not update the RanobeLIB catalogue");
+  const result = await call("ranobe-snapshot");
+  assert.equal(result.ranobe.titles[0].finalLoaded, true);
+  assert.equal(result.ranobe.enabled, false);
+}
+
 async function fixture(profile, archive) {
   const folder = "Книга [434103]";
   await fs.mkdir(path.join(archive, folder), { recursive: true });
@@ -213,6 +245,7 @@ async function main() {
   const profile = path.join(base, "profile");
   await fs.mkdir(profile);
   const png = await fixture(profile, path.join(base, "archive"));
+  await ranobeFixture(profile);
   await start(profile, ["--hidden", "novelpia-archive://title/391344"]);
   await until(() => evaluate("!document.querySelector('#detail').hidden && document.querySelector('#title').textContent === 'Второй тайтл'"), "Cold notification activation did not open the title");
   const initial = await call("snapshot");
@@ -233,6 +266,7 @@ async function main() {
   await evaluate("document.querySelector('#activity-nav').click()");
   assert.equal(await evaluate("document.querySelectorAll('.activity-event').length"), 3);
   await until(() => evaluate("document.querySelector('.activity-cover img')?.naturalWidth > 0"), "Legacy PNG preview did not load");
+  await checkRanobeCatalogue();
   if (process.env.NOVELPIA_SMOKE_CLICK_TOAST === "1") {
     await stop();
     await start(profile, ["--hidden"]);
@@ -261,9 +295,10 @@ async function main() {
   assert.equal(reopened.collectionLayout, "list");
   assert.equal(reopened.activity.length, 4);
   assert.ok(reopened.retired["434103"]);
+  assert.equal(reopened.ranobe.titles[0].finalLoaded, true);
   await stop();
   await checkInProgress(base);
-  console.log("RUST WEBVIEW PASS: legacy migration, PNG preview, collection sort/filter, theme, recent activity, cold/warm title activation, restart");
+  console.log("RUST WEBVIEW PASS: legacy migration, PNG preview, collection sort/filter, theme, recent activity, cold/warm title activation, RanobeLIB catalogue and local marks, restart");
 }
 
 main().catch(async (error) => {

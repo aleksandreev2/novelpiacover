@@ -14,8 +14,12 @@ let state,
   pendingSelection,
   activityLimit = 40,
   activityRenderKey = "",
-  savingCollection = false;
+  savingCollection = false,
+  ranobeAction,
+  ranobeError,
+  ranobeExpiryTimer;
 const pendingCollection = new Map();
+const pendingRanobeFinal = new Map();
 const statuses = ["completed", "discontinued", "delayed", "ongoing"];
 const themeMedia = window.matchMedia("(prefers-color-scheme: dark)");
 const titleOrder = new Intl.Collator("ru", { numeric: true, sensitivity: "base" });
@@ -398,6 +402,173 @@ function activityRow(event, existing, active) {
     row.append(badge, body);
     return row;
 }
+function renderRanobeTime(el, value, placeholder = "Ещё не было") {
+  setText(el, value ? date(value) : placeholder);
+  if (value) {
+    setAttribute(el, "datetime", value);
+    setAttribute(el, "title", new Date(value).toLocaleString("ru-RU"));
+  } else {
+    el.removeAttribute("datetime");
+    el.removeAttribute("title");
+  }
+}
+function createRanobeRow(id) {
+  const row = item("li", "ranobe-row");
+  const identity = item("div", "ranobe-identity");
+  const title = item("button", "ranobe-title");
+  title.type = "button";
+  title.append(item("span"), icon("external"));
+  title.onclick = (event) => {
+    if (!isSelectingText(event)) call("ranobe-open", { id }).catch((error) => toast(error.message));
+  };
+  const tags = item("div", "ranobe-tags");
+  tags.append(
+    item("span", "ranobe-project-status"),
+    item("span", "ranobe-shared", "Совместный проект"),
+    item("span", "ranobe-ready", "Готов к завершению"),
+  );
+  identity.append(title, tags);
+
+  const details = item("dl", "ranobe-details");
+  for (const [label, value] of [
+    ["Глав по расписанию", item("span", "ranobe-scheduled")],
+    ["Последняя проверка", item("time", "ranobe-checked")],
+  ]) {
+    const field = item("div");
+    const data = item("dd");
+    data.append(value);
+    field.append(item("dt", "", label), data);
+    details.append(field);
+  }
+  const final = item("label", "checkbox ranobe-final");
+  const checkbox = item("input");
+  checkbox.type = "checkbox";
+  checkbox.onclick = (event) => {
+    if (pendingRanobeFinal.has(id)) event.preventDefault();
+  };
+  checkbox.onchange = () => saveRanobeFinal(id, checkbox.checked);
+  final.append(checkbox, item("span", "", "Финальные главы загружены"));
+  const reason = item("span", "ranobe-schedule-note");
+  row.append(identity, details, reason, final);
+  return row;
+}
+function ranobeRow({ novel, known, ready, expired, connected }, row = createRanobeRow(novel.id)) {
+  const observation = novel.observation;
+  const title = row.querySelector(".ranobe-title");
+  setText(title.firstElementChild, novel.title);
+  setAttribute(title, "aria-label", `Открыть «${novel.title}» на RanobeLIB`);
+  const status = row.querySelector(".ranobe-project-status");
+  setAttribute(status, "class", `ranobe-project-status lifecycle ${novel.status}`);
+  setText(status, novel.status === "completed" ? "Завершён" : "Продолжается");
+  row.querySelector(".ranobe-shared").hidden = observation?.shared !== true;
+  row.querySelector(".ranobe-ready").hidden = !ready;
+  const scheduled = row.querySelector(".ranobe-scheduled");
+  setText(scheduled, novel.status === "completed" ? "—" : known ? observation.scheduled : "Нет данных");
+  scheduled.classList.toggle("muted", !known);
+  renderRanobeTime(row.querySelector(".ranobe-checked"), observation?.checkedAt);
+  const reason = row.querySelector(".ranobe-schedule-note");
+  const message = connected && !known && (observation?.message || (expired ? "Проверка устарела" : ""));
+  reason.hidden = !message;
+  setText(reason, message || "");
+  const checkbox = row.querySelector("input");
+  row.querySelector(".ranobe-final").hidden = novel.status === "completed";
+  const pending = pendingRanobeFinal.get(novel.id);
+  checkbox.checked = pending ?? novel.finalLoaded;
+  setAttribute(checkbox, "aria-disabled", String(pending !== undefined));
+  setAttribute(checkbox, "aria-label", `Финальные главы загружены в проекте «${novel.title}»`);
+  return row;
+}
+function renderRanobe() {
+  clearTimeout(ranobeExpiryTimer);
+  const active = view === "ranobe";
+  setAttribute($("ranobe-nav"), "aria-current", active ? "page" : "false");
+  $("ranobe-view").hidden = !active;
+  if (!active) return;
+  const ranobe = state?.ranobe;
+  const connected = !!ranobe?.connected;
+  const enabled = !!ranobe?.enabled;
+  const busy = ranobe?.busy || ({ "ranobe-login": "login", "ranobe-check": "check" })[ranobeAction];
+  $("ranobe-login").hidden = connected && busy !== "login";
+  $("ranobe-login").disabled = !!busy || !!ranobeAction || !ranobe;
+  $("ranobe-check").hidden = !connected || busy === "login";
+  $("ranobe-check").disabled = !!busy || !!ranobeAction;
+  $("ranobe-enabled").checked = enabled;
+  $("ranobe-enabled").disabled = (!connected && !enabled) || !!ranobeAction;
+  $("ranobe-status-pill").classList.toggle("paused", !connected || !!busy);
+  setText($("ranobe-status"), busy === "login" ? "Завершите вход в окне RanobeLIB" :
+    busy === "check" ? "Проверяем каталог и расписание…" :
+      connected ? "Вход выполнен" :
+        ranobe ? "Войдите, чтобы проверить каталог команды" : "Состояние RanobeLIB недоступно");
+  const error = ranobeError || ranobe?.error;
+  $("ranobe-error").hidden = !error;
+  setText($("ranobe-error"), error);
+  $("ranobe-scan-times").hidden = !ranobe?.lastScanAt && !ranobe?.nextScanAt;
+  renderRanobeTime($("ranobe-last-scan"), ranobe?.lastScanAt);
+  renderRanobeTime($("ranobe-next-scan"), enabled && connected && ranobe?.nextScanAt, "—");
+
+  const titles = ranobe?.titles || [];
+  $("ranobe-catalogue").hidden = !ranobe?.lastScanAt && !titles.length;
+  const completed = titles.filter((novel) => novel.status === "completed").length;
+  setText($("ranobe-total"), titles.length);
+  setText($("ranobe-ongoing"), titles.length - completed);
+  setText($("ranobe-completed"), completed);
+  const query = $("ranobe-search").value.trim().toLocaleLowerCase("ru");
+  const filter = $("ranobe-filter").value;
+  const now = Date.now();
+  let nextExpiry = Infinity;
+  const matches = [];
+  for (const novel of titles) {
+    const observation = novel.observation;
+    const expiresAt = Date.parse(observation?.nextCheckAt);
+    const expired = observation?.state === "known" && expiresAt <= now;
+    const known = connected && observation?.state === "known" && expiresAt > now &&
+      Number.isInteger(observation.scheduled) && observation.scheduled >= 0;
+    const ready = novel.status === "ongoing" && novel.finalLoaded && known &&
+      observation.scheduled === 0 && observation.shared === false && pendingRanobeFinal.get(novel.id) !== false;
+    if (known) nextExpiry = Math.min(nextExpiry, expiresAt);
+    const matchesFilter = filter === "all" || filter === novel.status ||
+      (filter === "ready" && ready) || (filter === "unknown" && novel.status === "ongoing" && !known);
+    if (matchesFilter && `${novel.title} ${novel.slug} ${novel.id}`.toLocaleLowerCase("ru").includes(query))
+      matches.push({ novel, known, ready, expired, connected });
+  }
+  matches.sort((a, b) => titleOrder.compare(a.novel.title, b.novel.title) || a.novel.id - b.novel.id);
+  if (Number.isFinite(nextExpiry))
+    ranobeExpiryTimer = setTimeout(renderRanobe, Math.min(nextExpiry - now, 2_147_483_647));
+  setText($("ranobe-count"), matches.length === titles.length ? "" : `Найдено ${matches.length} из ${titles.length}`);
+  $("ranobe-empty").hidden = !!matches.length;
+  setText($("ranobe-empty"), titles.length ? "Проекты не найдены. Измените запрос или фильтр." :
+    busy === "check" ? "Загружаем проекты команды…" :
+      !connected ? "Проекты появятся после входа и проверки каталога." :
+        ranobe.lastScanAt ? "В каталоге команды нет проектов." : "Запустите проверку, чтобы загрузить проекты команды.");
+  reconcileRows($("ranobe-titles"), matches, ({ novel }) => String(novel.id), ranobeRow);
+}
+async function runRanobeAction(action, payload) {
+  if (ranobeAction || (state?.ranobe?.busy && action !== "ranobe-settings")) return;
+  ranobeAction = action;
+  ranobeError = "";
+  renderRanobe();
+  try {
+    await call(action, payload);
+  } catch (error) {
+    ranobeError = error.message;
+  } finally {
+    ranobeAction = undefined;
+    renderRanobe();
+  }
+}
+async function saveRanobeFinal(id, finalLoaded) {
+  pendingRanobeFinal.set(id, finalLoaded);
+  ranobeError = "";
+  renderRanobe();
+  try {
+    await call("ranobe-final", { id, finalLoaded });
+  } catch (error) {
+    ranobeError = error.message;
+  } finally {
+    pendingRanobeFinal.delete(id);
+    renderRanobe();
+  }
+}
 function showAdd() {
   if (working) return;
   $("add-error").textContent = "";
@@ -445,8 +616,11 @@ function render() {
     selected = state.novels[0]?.id || null;
     limit = 24;
   }
-  $("recovery").hidden = !state.recovered;
-  $("notification-warning").hidden = !state.notificationWarning;
+  const inRanobe = view === "ranobe";
+  $("archive-toolbar").hidden = inRanobe;
+  $("archive-footer").hidden = inRanobe;
+  $("recovery").hidden = inRanobe || !state.recovered;
+  $("notification-warning").hidden = inRanobe || !state.notificationWarning;
   setText($("notification-warning"), state.notificationWarning);
   setText($("novel-count"), state.novels.length);
   const progress = state.checkProgress;
@@ -470,7 +644,8 @@ function render() {
   const n = current();
   renderCollection(query);
   renderActivity();
-  $("empty").hidden = view === "activity" || !!n;
+  renderRanobe();
+  $("empty").hidden = view === "activity" || inRanobe || !!n;
   $("detail").hidden = view !== "title" || !n;
   if ($("detail").hidden) return;
   setText($("title"), n.title);
@@ -637,6 +812,20 @@ for (const id of ["activity-search", "activity-filter"])
   $(id).addEventListener(id === "activity-search" ? "input" : "change", () => { activityLimit = 40; renderActivity(); });
 $("activity-more").onclick = () => { activityLimit += 40; renderActivity(); };
 $("activity-read").onclick = () => call("activity-read", state.activitySequence).catch(e => toast(e.message));
+$("ranobe-nav").onclick = () => {
+  if (!state) return;
+  ranobeError = "";
+  showView("ranobe", "ranobe-heading");
+  call("ranobe-snapshot").catch((error) => {
+    ranobeError = error.message;
+    renderRanobe();
+  });
+};
+$("ranobe-search").oninput = renderRanobe;
+$("ranobe-filter").onchange = renderRanobe;
+$("ranobe-login").onclick = () => runRanobeAction("ranobe-login");
+$("ranobe-check").onclick = () => runRanobeAction("ranobe-check", { force: false });
+$("ranobe-enabled").onchange = (event) => runRanobeAction("ranobe-settings", { enabled: event.target.checked });
 $("more").onclick = () => {
   limit += 24;
   render();

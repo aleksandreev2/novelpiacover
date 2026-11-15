@@ -46,6 +46,10 @@
             <span>Последние события</span>
             <span id="activity-badge" class="activity-badge" hidden>0</span>
           </button>
+          <button id="ranobe-nav" class="nav-button" aria-current="false">
+            <svg class="icon" aria-hidden="true"><use href="#icon-book" /></svg>
+            <span>RanobeLIB</span>
+          </button>
         </nav>
         <label class="search"
           ><span class="sr-only">Найти новеллу</span
@@ -62,7 +66,7 @@
         </div>
       </aside>
       <main>
-        <header class="toolbar">
+        <header id="archive-toolbar" class="toolbar">
           <div id="monitor-status" class="status-pill">
             <span id="monitor-label" role="status">Наблюдение включено</span>
             <span id="check-progress" class="check-progress" hidden></span>
@@ -149,6 +153,65 @@
           <ol id="activity-list" class="activity-list" aria-label="События по тайтлам"></ol>
           <button id="activity-more" hidden>Показать ещё</button>
           <p class="activity-footnote">Хранятся последние 500 событий. Время — момент обнаружения изменения. События «Из истории» перенесены из вашего архива.</p>
+        </section>
+        <section id="ranobe-view" aria-labelledby="ranobe-heading" hidden>
+          <div class="ranobe-heading">
+            <div>
+              <h1 id="ranobe-heading" tabindex="-1">RanobeLIB</h1>
+              <p>Проекты команды и расписание глав</p>
+            </div>
+            <button id="ranobe-login" class="primary">Войти в RanobeLIB</button>
+            <button id="ranobe-check" class="primary icon-label" hidden>
+              <svg class="icon" aria-hidden="true"><use href="#icon-refresh" /></svg>
+              <span>Запустить проверку</span>
+            </button>
+          </div>
+          <div class="ranobe-session">
+            <div class="ranobe-session-top">
+              <div id="ranobe-status-pill" class="status-pill paused">
+                <span id="ranobe-status" role="status"></span>
+              </div>
+              <label class="checkbox">
+                <input id="ranobe-enabled" type="checkbox" />
+                Автоматические проверки
+              </label>
+            </div>
+            <dl id="ranobe-scan-times" class="ranobe-scan-times" hidden>
+              <div><dt>Последняя проверка каталога</dt><dd><time id="ranobe-last-scan"></time></dd></div>
+              <div><dt>Следующая проверка каталога</dt><dd><time id="ranobe-next-scan"></time></dd></div>
+            </dl>
+            <p class="field-help">Приложение читает данные RanobeLIB. Отметки о финальных главах хранятся на этом компьютере.</p>
+          </div>
+          <p id="ranobe-error" class="error-box" role="alert" hidden></p>
+          <div id="ranobe-catalogue" hidden>
+            <div class="ranobe-catalogue-heading">
+              <h2>Проекты команды</h2>
+              <dl class="ranobe-counts">
+                <div><dt>Всего</dt><dd id="ranobe-total"></dd></div>
+                <div><dt>В работе</dt><dd id="ranobe-ongoing"></dd></div>
+                <div><dt>Завершено</dt><dd id="ranobe-completed"></dd></div>
+              </dl>
+            </div>
+            <div class="ranobe-filters">
+              <label>
+                <span class="sr-only">Найти проект в каталоге команды</span>
+                <input id="ranobe-search" type="search" placeholder="Найти проект" />
+              </label>
+              <label>
+                <span class="sr-only">Фильтр проектов</span>
+                <select id="ranobe-filter">
+                  <option value="all">Все проекты</option>
+                  <option value="ongoing">В работе</option>
+                  <option value="completed">Завершённые</option>
+                  <option value="ready">Готовы к завершению</option>
+                  <option value="unknown">Расписание неизвестно</option>
+                </select>
+              </label>
+              <span id="ranobe-count" class="muted" role="status"></span>
+            </div>
+          </div>
+          <p id="ranobe-empty" class="ranobe-empty muted"></p>
+          <ul id="ranobe-titles" class="ranobe-titles" aria-label="Проекты команды RanobeLIB"></ul>
         </section>
         <section id="empty" class="empty">
           <div class="empty-art"><svg class="icon" aria-hidden="true"><use href="#icon-books" /></svg></div>
@@ -240,7 +303,7 @@
           <div id="history" class="history-grid"></div>
           <button id="more" hidden>Показать ещё</button>
         </section>
-        <footer>
+        <footer id="archive-footer">
           <button id="root" class="path-button icon-label" title="Открыть папку архива">
             <svg class="icon" aria-hidden="true"><use href="#icon-folder" /></svg><span id="root-path">Выберите папку архива</span>
           </button>

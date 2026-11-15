@@ -9,10 +9,21 @@ const fs = require("node:fs/promises");
   const prepackaged = path.join(projectDir, "release/rust-windows-x64");
   const exe = path.join(projectDir, "src-tauri/target/release/NovelpiaCoverArchive.exe");
   const bootstrap = path.join(projectDir, "assets/WebView2Setup.exe");
+  if (process.platform !== "win32" || process.arch !== "x64" || process.version !== "v24.18.0") {
+    throw new Error("Для установщика требуется официальный Node.js 24.18.0 для Windows x64.");
+  }
   await fs.access(bootstrap);
   process.env.NOVELPIA_WEBVIEW_BOOTSTRAP = bootstrap;
   await fs.mkdir(prepackaged, { recursive: true });
   await fs.copyFile(exe, path.join(prepackaged, "NovelpiaCoverArchive.exe"));
+  const ranobe = path.join(prepackaged, "ranobelib");
+  const worker = path.join(ranobe, "worker");
+  const playwright = path.dirname(require.resolve("playwright-core/package.json"));
+  await fs.mkdir(worker, { recursive: true });
+  await fs.copyFile(process.execPath, path.join(ranobe, "node.exe"));
+  await fs.copyFile(path.join(projectDir, "assets/node-v24.18.0-LICENSE.txt"), path.join(ranobe, "NODE-LICENSE.txt"));
+  await fs.copyFile(path.join(projectDir, "worker/ranobelib.cjs"), path.join(worker, "ranobelib.cjs"));
+  await fs.cp(playwright, path.join(ranobe, "node_modules/playwright-core"), { recursive: true });
   const results = await build({
     projectDir,
     prepackaged,

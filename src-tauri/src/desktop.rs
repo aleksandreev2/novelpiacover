@@ -47,7 +47,10 @@ use windows::{
 };
 use winreg::{enums::HKEY_CURRENT_USER, RegKey};
 
-use crate::monitor::{Monitor, Notice};
+use crate::{
+    monitor::{Monitor, Notice},
+    ranobelib::{Operation, RanobeLib},
+};
 
 const APP_ID: &str = "com.novelpia.coverarchive";
 const MAIN: &str = "main";
@@ -226,6 +229,7 @@ struct Selection {
 
 struct Desktop {
     monitor: Arc<Monitor>,
+    ranobelib: RanobeLib,
     can_login: bool,
     selection: Mutex<Selection>,
     warning: Mutex<String>,
@@ -233,13 +237,16 @@ struct Desktop {
     shutting_down: AtomicBool,
     operations: RwLock<()>,
     settings: Mutex<()>,
+    snapshots: Mutex<()>,
 }
 
 impl Desktop {
     fn snapshot(&self) -> Value {
+        let _snapshot = self.snapshots.lock().unwrap();
         let mut snapshot = self.monitor.snapshot();
         snapshot["canLogin"] = json!(self.can_login);
         snapshot["notificationWarning"] = json!(*self.warning.lock().unwrap());
+        snapshot["ranobe"] = self.ranobelib.snapshot();
         snapshot
     }
 
@@ -249,7 +256,38 @@ impl Desktop {
             bail!("Архив закрывается.");
         }
         match action {
-            "snapshot" => Ok(self.snapshot()),
+            "snapshot" | "ranobe-snapshot" => Ok(self.snapshot()),
+            "ranobe-login" | "ranobe-check" => {
+                let operation = if action == "ranobe-login" {
+                    Operation::Login
+                } else {
+                    Operation::Check
+                };
+                let force = payload["force"].as_bool().unwrap_or(false);
+                start_ranobe(app, self, operation, false, force)?;
+                Ok(self.snapshot())
+            }
+            "ranobe-settings" => {
+                self.ranobelib.set_enabled(
+                    payload["enabled"]
+                        .as_bool()
+                        .context("Неверное значение настройки.")?,
+                )?;
+                Ok(self.snapshot())
+            }
+            "ranobe-final" => {
+                self.ranobelib.set_final(
+                    ranobe_id(&payload)?,
+                    payload["finalLoaded"]
+                        .as_bool()
+                        .context("Неверное значение отметки.")?,
+                )?;
+                Ok(self.snapshot())
+            }
+            "ranobe-open" => {
+                open::that(self.ranobelib.site(ranobe_id(&payload)?)?)?;
+                Ok(Value::Null)
+            }
             "choose-root" => {
                 let root = self.monitor.root();
                 let folder = if root.as_os_str().is_empty() {
@@ -435,6 +473,13 @@ fn text_arg(value: &Value) -> Result<&str> {
     value.as_str().context("Неверный параметр запроса.")
 }
 
+fn ranobe_id(payload: &Value) -> Result<u64> {
+    payload["id"]
+        .as_u64()
+        .filter(|&id| id > 0)
+        .context("Неверный идентификатор тайтла.")
+}
+
 fn trusted_window(window: &WebviewWindow) -> Result<()> {
     let url = window.url()?;
     if window.label() != MAIN || !app_url(&url) {
@@ -528,6 +573,47 @@ fn start_tick(app: &AppHandle) {
                 break;
             }
             if let Err(error) = desktop.monitor.tick() {
+                report(&app, &error);
+            }
+        }
+        std::thread::sleep(Duration::from_secs(15));
+    });
+}
+
+fn start_ranobe(
+    app: &AppHandle,
+    desktop: &Desktop,
+    operation: Operation,
+    automatic: bool,
+    force: bool,
+) -> Result<()> {
+    if desktop.ranobelib.begin(operation, automatic)? {
+        let _ = app.emit_to(MAIN, "archive-changed", desktop.snapshot());
+        let app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let desktop = app.state::<Desktop>();
+            let _operation = desktop.operations.read().unwrap();
+            if !desktop.shutting_down.load(Ordering::Acquire) {
+                desktop
+                    .ranobelib
+                    .run(operation, force, &desktop.shutting_down);
+                let _ = app.emit_to(MAIN, "archive-changed", desktop.snapshot());
+            }
+        });
+    }
+    Ok(())
+}
+
+fn start_ranobe_tick(app: &AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || loop {
+        let desktop = app.state::<Desktop>();
+        {
+            let _operation = desktop.operations.read().unwrap();
+            if desktop.shutting_down.load(Ordering::Acquire) {
+                break;
+            }
+            if let Err(error) = start_ranobe(&app, &desktop, Operation::Check, true, false) {
                 report(&app, &error);
             }
         }
@@ -682,6 +768,7 @@ pub fn run() -> Result<()> {
             let (profile, can_login) = profile_path()?;
             let browser_data = profile.join("webview2");
             fs::create_dir_all(&browser_data)?;
+            let ranobelib = RanobeLib::open(&profile);
             let monitor = Arc::new(Monitor::open(profile)?);
             let pause = MenuItem::with_id(
                 app,
@@ -692,6 +779,7 @@ pub fn run() -> Result<()> {
             )?;
             app.manage(Desktop {
                 monitor: monitor.clone(),
+                ranobelib,
                 can_login,
                 selection: Mutex::new(Selection {
                     ready: false,
@@ -702,6 +790,7 @@ pub fn run() -> Result<()> {
                 shutting_down: AtomicBool::new(false),
                 operations: RwLock::new(()),
                 settings: Mutex::new(()),
+                snapshots: Mutex::new(()),
             });
             WebviewWindowBuilder::new(app, MAIN, WebviewUrl::App("index.html".into()))
                 .title("Novelpia Cover Archive")
@@ -725,6 +814,7 @@ pub fn run() -> Result<()> {
                 reveal(app.handle(), None);
             }
             start_tick(app.handle());
+            start_ranobe_tick(app.handle());
             Ok(())
         })
         .run(tauri::generate_context!())?;
