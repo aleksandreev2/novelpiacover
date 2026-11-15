@@ -1363,6 +1363,9 @@ button.ranobe-title {
   font-size: 12px;
   overflow-wrap: anywhere;
 }
+.ranobe-recheck-note {
+  color: var(--muted);
+}
 @container ranobe (max-width: 630px) {
   .ranobe-row {
     grid-template-columns: minmax(0, 1fr);

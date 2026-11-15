@@ -123,17 +123,22 @@ async function ranobeFixture(profile) {
       { id: 43, slug: "43--complete", title: "Завершённый тайтл", status: "completed" },
       { id: 44, slug: "44--unknown", title: "Непроверенный тайтл", status: "ongoing",
         observation: { state: "unknown", checkedAt, nextCheckAt, diagnostic } },
+      { id: 45, slug: "45--empty", title: "Тайтл без глав", status: "ongoing",
+        observation: { state: "unknown", checkedAt, nextCheckAt, message: "RanobeLIB вернул пустой список глав." } },
     ],
-    finalLoaded: [42],
+    finalLoaded: [42, 45],
   }));
 }
 
 async function checkRanobeCatalogue() {
   await evaluate("document.querySelector('#ranobe-nav').click()");
-  await until(() => evaluate("!document.querySelector('#ranobe-view').hidden && document.querySelector('#ranobe-total').textContent === '4'"), "RanobeLIB catalogue did not open");
+  await until(() => evaluate("!document.querySelector('#ranobe-view').hidden && document.querySelector('#ranobe-total').textContent === '5'"), "RanobeLIB catalogue did not open");
   assert.equal(await evaluate("document.querySelector('#ranobe-completed').textContent"), "1");
   assert.equal(await evaluate("document.querySelector('[data-key=\"44\"] .ranobe-scheduled').textContent"), "Нет данных");
   assert.match(await evaluate("document.querySelector('[data-key=\"44\"] .ranobe-schedule-note').textContent"), /Список глав.*HTTP 404/);
+  assert.equal(await evaluate("document.querySelector('[data-key=\"45\"] .ranobe-scheduled').textContent"), "Глав пока нет");
+  assert.match(await evaluate("document.querySelector('[data-key=\"45\"] .ranobe-schedule-note').textContent"), /Повторная проверка с /);
+  assert.equal(await evaluate("document.querySelector('[data-key=\"45\"] .ranobe-ready').hidden"), true);
   await evaluate("document.querySelector('#ranobe-diagnostics summary').click()");
   await until(() => evaluate("document.querySelector('#ranobe-report-text').value.includes('#44')"), "Diagnostic report did not show the affected title");
   await evaluate(`Object.defineProperty(navigator, "clipboard", {
@@ -141,14 +146,17 @@ async function checkRanobeCatalogue() {
     value: { writeText: async (text) => { window.smokeReport = text; } }
   }); document.querySelector('#ranobe-copy-report').click()`);
   const report = await evaluate("window.smokeReport");
-  assert.match(report, /Проверено расписаний 3/);
+  assert.match(report, /Проверено тайтлов 3/);
   assert.match(report, /#44.*Список глав.*HTTP 404/);
+  assert.match(report, /#45.*повторная проверка с/);
   assert.equal(await evaluate("document.querySelector('[data-key=\"42\"] .ranobe-ready').hidden"), true);
   await evaluate("document.querySelector('[data-key=\"41\"] input').click()");
   await until(() => evaluate("!document.querySelector('[data-key=\"41\"] .ranobe-ready').hidden"), "Final mark did not update the RanobeLIB catalogue");
   const result = await call("ranobe-snapshot");
   assert.equal(result.ranobe.titles[0].finalLoaded, true);
   assert.equal(result.ranobe.enabled, false);
+  const { checkedAt, nextCheckAt } = result.ranobe.titles[4].observation;
+  assert.equal(Date.parse(nextCheckAt) - Date.parse(checkedAt), 48 * 60 * 60 * 1000);
 }
 
 async function fixture(profile, archive) {

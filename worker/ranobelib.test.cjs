@@ -218,11 +218,33 @@ test('combines identified branches with chapters attributed directly to the team
 	assert.equal(observation.shared, false);
 });
 
+test('defers a confirmed empty chapter list for 48 hours and checks it again when due', async () => {
+	const { get, calls } = fixture({ chapters: { 11: records([]) } });
+	const first = await scanTeam(get, { known: [], force: false }, now);
+	const { observation } = first.items[0];
+	assert.equal(observation.state, 'empty');
+	assert.equal(observation.scheduled, undefined);
+	assert.equal(observation.diagnostic, undefined);
+	assert.equal(observation.nextCheckAt, '2026-11-17T10:00:00.000Z');
+
+	const input = { known: [{ id: 11, status: 'ongoing', nextCheckAt: observation.nextCheckAt }], force: false };
+	calls.length = 0;
+	const before = await scanTeam(get, input, new Date('2026-11-17T09:59:59Z'));
+	assert.equal(before.items[0].observation, undefined);
+	assert.ok(!calls.includes('branches:11'));
+	assert.ok(!calls.includes('chapters:11'));
+
+	const due = await scanTeam(get, input, new Date(observation.nextCheckAt));
+	assert.ok(calls.includes('chapters:11'));
+	assert.equal(due.items[0].observation.state, 'empty');
+});
+
 test('marks missing ownership, malformed timestamps, and incomplete chapter pages unknown', async t => {
 	const cases = {
 		'no team branch': { branches: { 11: records([branch(5, 10)]) } },
 		'no chapter carrying a team branch': { chapters: { 11: records([chapter(101, [6, later])]) } },
-		'empty chapter list': { chapters: { 11: records([]) } },
+		'missing chapter list': { chapters: { 11: {} } },
+		'empty first page with more pages advertised': { chapters: { 11: listing([], 1, 2) } },
 		'no attribution on unbranched chapter': { chapters: { 11: records([chapter(101, [null, later])]) } },
 		'invalid publication timestamp': { chapters: { 11: records([chapter(101, [5, 'invalid'])]) } },
 		'advertised second page unavailable': { chapters: { 11: listing([chapter(101, [5, earlier])], 1, 2) } },

@@ -447,8 +447,8 @@ function renderRanobeReport(ranobe) {
     const operation = attempt.operation === "login" ? "Вход" : "Проверка";
     lines.push(`${operation} · ${new Date(attempt.finishedAt).toLocaleString("ru-RU")} · ${duration} с`);
     if (attempt.counts) {
-      const { known, unknown, notDue, completed } = attempt.counts;
-      lines.push(`Проверено расписаний ${known + unknown} · подтверждено ${known} · нет данных ${unknown}`,
+      const { known, empty = 0, unknown, notDue, completed } = attempt.counts;
+      lines.push(`Проверено тайтлов ${known + empty + unknown} · подтверждено расписаний ${known} · без глав ${empty} · нет данных ${unknown}`,
         `Ещё не пора обновлять ${notDue} · завершённых переводов ${completed}`);
     }
     if (attempt.diagnostic) {
@@ -465,6 +465,12 @@ function renderRanobeReport(ranobe) {
     for (const { id, observation } of issues) {
       lines.push(`#${id} · ${date(observation.checkedAt)} · ${ranobeDiagnosticText(observation.diagnostic, true)}`);
     }
+  }
+  const empty = (ranobe?.titles ?? []).filter(({ status, observation }) => status === "ongoing" && observation?.state === "empty");
+  if (empty.length) {
+    lines.push("", "Тайтлы без глав");
+    for (const { id, observation } of empty)
+      lines.push(`#${id} · повторная проверка с ${date(observation.nextCheckAt)}`);
   }
   const report = lines.join("\n");
   if (field.value !== report) field.value = report;
@@ -509,7 +515,7 @@ function createRanobeRow(id) {
   row.append(identity, details, reason, final);
   return row;
 }
-function ranobeRow({ novel, known, ready, expired, connected }, row = createRanobeRow(novel.id)) {
+function ranobeRow({ novel, known, empty, ready, expired, connected }, row = createRanobeRow(novel.id)) {
   const observation = novel.observation;
   const title = row.querySelector(".ranobe-title");
   setText(title.firstElementChild, novel.title);
@@ -520,13 +526,15 @@ function ranobeRow({ novel, known, ready, expired, connected }, row = createRano
   row.querySelector(".ranobe-shared").hidden = observation?.shared !== true;
   row.querySelector(".ranobe-ready").hidden = !ready;
   const scheduled = row.querySelector(".ranobe-scheduled");
-  setText(scheduled, novel.status === "completed" ? "—" : known ? observation.scheduled : "Нет данных");
+  setText(scheduled, novel.status === "completed" ? "—" : known ? observation.scheduled : empty ? "Глав пока нет" : "Нет данных");
   scheduled.classList.toggle("muted", !known);
   renderRanobeTime(row.querySelector(".ranobe-checked"), observation?.checkedAt);
   const reason = row.querySelector(".ranobe-schedule-note");
-  const message = connected && !known && (observation?.diagnostic ? ranobeDiagnosticText(observation.diagnostic) :
-    observation?.message || (expired ? "Проверка устарела" : ""));
+  const message = empty ? `Повторная проверка с ${date(observation.nextCheckAt)}` :
+    connected && !known && (observation?.diagnostic ? ranobeDiagnosticText(observation.diagnostic) :
+      observation?.message || (expired ? "Проверка устарела" : ""));
   reason.hidden = !message;
+  reason.classList.toggle("ranobe-recheck-note", empty);
   setText(reason, message || "");
   const checkbox = row.querySelector("input");
   row.querySelector(".ranobe-final").hidden = novel.status === "completed";
@@ -579,6 +587,7 @@ function renderRanobe() {
   for (const novel of titles) {
     const observation = novel.observation;
     const expiresAt = Date.parse(observation?.nextCheckAt);
+    const empty = novel.status === "ongoing" && observation?.state === "empty";
     const expired = observation?.state === "known" && expiresAt <= now;
     const known = connected && observation?.state === "known" && expiresAt > now &&
       Number.isInteger(observation.scheduled) && observation.scheduled >= 0;
@@ -586,9 +595,10 @@ function renderRanobe() {
       observation.scheduled === 0 && observation.shared === false && pendingRanobeFinal.get(novel.id) !== false;
     if (known) nextExpiry = Math.min(nextExpiry, expiresAt);
     const matchesFilter = filter === "all" || filter === novel.status ||
-      (filter === "ready" && ready) || (filter === "unknown" && novel.status === "ongoing" && !known);
+      (filter === "ready" && ready) || (filter === "empty" && empty) ||
+      (filter === "unknown" && novel.status === "ongoing" && !known && !empty);
     if (matchesFilter && `${novel.title} ${novel.slug} ${novel.id}`.toLocaleLowerCase("ru").includes(query))
-      matches.push({ novel, known, ready, expired, connected });
+      matches.push({ novel, known, empty, ready, expired, connected });
   }
   matches.sort((a, b) => titleOrder.compare(a.novel.title, b.novel.title) || a.novel.id - b.novel.id);
   if (Number.isFinite(nextExpiry))

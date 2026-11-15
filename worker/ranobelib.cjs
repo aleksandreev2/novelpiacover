@@ -160,7 +160,13 @@ async function readBranchTeams(get, item) {
 
 async function readChapterSchedule(get, item, now, branchTeams) {
 	const chapterRows = await readAll(get, new URL(`/api/manga/${encodeURIComponent(item.slug)}/chapters`, API_ORIGIN));
-	if (chapterRows.length === 0) throw new WorkerError('schema', 'RanobeLIB вернул пустой список глав.');
+	if (chapterRows.length === 0) {
+		return {
+			state: 'empty',
+			checkedAt: now.toISOString(),
+			nextCheckAt: new Date(now.getTime() + 2 * DAY).toISOString(),
+		};
+	}
 	let shared = [...branchTeams.values()].some(teams => teams.some(id => id !== TEAM_ID));
 	let ownsChapters = false;
 	let earliestFuture = Infinity;

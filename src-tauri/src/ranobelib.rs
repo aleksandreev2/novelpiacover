@@ -36,6 +36,7 @@ enum Status {
 #[serde(rename_all = "lowercase")]
 enum ObservationState {
     Known,
+    Empty,
     Unknown,
 }
 
@@ -65,6 +66,8 @@ struct Attempt {
 struct ScanCounts {
     completed: usize,
     known: usize,
+    #[serde(default)]
+    empty: usize,
     unknown: usize,
     not_due: usize,
 }
@@ -78,6 +81,7 @@ impl ScanCounts {
             } else {
                 match item.observation.as_ref().map(|value| value.state) {
                     Some(ObservationState::Known) => counts.known += 1,
+                    Some(ObservationState::Empty) => counts.empty += 1,
                     Some(ObservationState::Unknown) => counts.unknown += 1,
                     None => counts.not_due += 1,
                 }
@@ -98,6 +102,27 @@ struct Observation {
     shared: Option<bool>,
     message: Option<String>,
     diagnostic: Option<Diagnostic>,
+}
+
+impl Observation {
+    fn upgrade_empty_chapter_list(&mut self) {
+        // Earlier versions emitted this message only for a valid, empty API list.
+        if self.state == ObservationState::Unknown
+            && self.message.as_deref() == Some("RanobeLIB вернул пустой список глав.")
+        {
+            if let Some(next) = self.checked_at.checked_add_signed(TimeDelta::days(2)) {
+                self.state = ObservationState::Empty;
+                self.next_check_at = next;
+                self.message = None;
+                self.diagnostic = None;
+            }
+        }
+    }
+
+    fn recheck_at(&self) -> Option<DateTime<Utc>> {
+        (self.state != ObservationState::Unknown || self.diagnostic.is_some())
+            .then_some(self.next_check_at)
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -225,10 +250,19 @@ impl RanobeLib {
         let file = directory.join("ranobelib.json");
         let state = match fs::read(&file) {
             Ok(bytes) => match serde_json::from_slice::<Profile>(&bytes) {
-                Ok(profile) => State {
-                    profile,
-                    ..State::default()
-                },
+                Ok(mut profile) => {
+                    for observation in profile
+                        .titles
+                        .iter_mut()
+                        .filter_map(|title| title.observation.as_mut())
+                    {
+                        observation.upgrade_empty_chapter_list();
+                    }
+                    State {
+                        profile,
+                        ..State::default()
+                    }
+                }
                 Err(_) => State {
                     error: Some("Не удалось прочитать сохранённые настройки RanobeLIB.".into()),
                     ..State::default()
@@ -349,9 +383,7 @@ impl RanobeLib {
                 "id": title.id,
                 "status": title.status,
                 "checkedAt": title.observation.as_ref().map(|observation| observation.checked_at),
-                "nextCheckAt": title.observation.as_ref()
-                    .filter(|observation| observation.state == ObservationState::Known || observation.diagnostic.is_some())
-                    .map(|observation| observation.next_check_at),
+                "nextCheckAt": title.observation.as_ref().and_then(Observation::recheck_at),
             })).collect();
             json!({ "known": known, "force": force })
         };
@@ -641,5 +673,29 @@ mod tests {
                 assert_eq!(profile.next_scan_at, Some(now + TimeDelta::minutes(3)));
             }
         }
+    }
+
+    #[test]
+    fn upgrades_only_old_confirmed_empty_lists_for_the_full_recheck_interval() {
+        let now = Utc::now();
+        let mut observation = Observation {
+            state: ObservationState::Unknown,
+            scheduled: None,
+            last_publish_at: None,
+            checked_at: now,
+            next_check_at: now + TimeDelta::minutes(15),
+            shared: None,
+            message: Some("В ответе RanobeLIB нет списка записей.".into()),
+            diagnostic: None,
+        };
+        observation.upgrade_empty_chapter_list();
+        assert!(observation.state == ObservationState::Unknown);
+        assert_eq!(observation.next_check_at, now + TimeDelta::minutes(15));
+        observation.message = Some("RanobeLIB вернул пустой список глав.".into());
+        observation.upgrade_empty_chapter_list();
+        assert!(observation.state == ObservationState::Empty);
+        assert_eq!(observation.recheck_at(), Some(now + TimeDelta::days(2)));
+        assert!(observation.scheduled.is_none());
+        assert!(observation.message.is_none());
     }
 }
