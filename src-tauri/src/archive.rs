@@ -3,7 +3,7 @@ use crate::{
     novelpia::Source,
 };
 use anyhow::{bail, Context, Result};
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use image::{
     codecs::{jpeg::JpegEncoder, png::PngEncoder},
     DynamicImage, ImageDecoder, ImageEncoder, ImageFormat, ImageReader, Limits,
@@ -333,6 +333,78 @@ fn content_address(source: &str) -> Option<(String, usize)> {
     Some((md5.to_owned(), length.parse().ok()?))
 }
 
+fn intact_png(entry: &Entry) -> bool {
+    if !fs::symlink_metadata(&entry.file).is_ok_and(|metadata| {
+        metadata.is_file() && !is_reparse_point(&metadata) && metadata.len() == entry.bytes
+    }) {
+        return false;
+    }
+    let Ok(file) = File::open(&entry.file) else {
+        return false;
+    };
+    let mut reader = BufReader::new(file);
+    reader
+        .fill_buf()
+        .is_ok_and(|header| header.starts_with(b"\x89PNG\r\n\x1a\n"))
+        && decode(reader)
+            .is_ok_and(|image| image.width() == entry.width && image.height() == entry.height)
+}
+
+pub fn cached_cover(novel: &Novel, source: &Source) -> Option<Entry> {
+    content_address(&source.url)?;
+    let (entry, at) = if let Some(verification) = novel.cover_verifications.get(&source.url) {
+        let verification = verification.as_ref()?;
+        let entry = novel
+            .history
+            .iter()
+            .rev()
+            .find(|entry| entry.hash == verification.hash)?;
+        (entry, &verification.at)
+    } else if novel.cover_verifications.is_empty()
+        && novel.sources.iter().any(|old| old.url == source.url)
+    {
+        // A 2.1.0 profile has no per-URL proof. The original can seed it only
+        // from the preferred cover, even if pixel dedup moved its archive entry.
+        let entry = novel
+            .history
+            .iter()
+            .rev()
+            .find(|entry| entry.source == source.url)?;
+        if entry.addressed_source != Some(true)
+            || (source.kind == "original" && novel.latest_hash.as_ref() != Some(&entry.hash))
+        {
+            return None;
+        }
+        let at = if let Some(at) = &entry.source_validated_at {
+            at
+        } else {
+            let at = novel.last_check.as_ref()?;
+            if novel.failures != 0
+                || !novel.error.is_empty()
+                || DateTime::parse_from_rfc3339(at).ok()?
+                    < DateTime::parse_from_rfc3339(&entry.saved_at).ok()?
+            {
+                return None;
+            }
+            at
+        };
+        (entry, at)
+    } else {
+        return None;
+    };
+    let age = Utc::now().signed_duration_since(DateTime::parse_from_rfc3339(at).ok()?);
+    if age < TimeDelta::zero()
+        || age > TimeDelta::hours(24)
+        || !known_file(entry, novel)
+        || !intact_png(entry)
+    {
+        return None;
+    }
+    let mut entry = entry.clone();
+    entry.source_validated_at = Some(at.clone());
+    Some(entry)
+}
+
 impl Archive {
     pub fn open(novel: &Novel, root: &Path) -> Result<Self> {
         let folder = Path::new(&novel.folder);
@@ -402,6 +474,7 @@ impl Archive {
                 kind: "recovered".into(),
                 source: String::new(),
                 addressed_source: None,
+                source_validated_at: None,
             });
         }
         Ok(Self {
@@ -418,13 +491,15 @@ impl Archive {
     }
 
     pub fn save(&mut self, novel: &Novel, source: &Source, bytes: &[u8]) -> Result<(Entry, bool)> {
-        let address = content_address(&source.url).filter(|(hash, size)| {
+        let address = content_address(&source.url);
+        let validated_address = address.as_ref().filter(|(hash, size)| {
             *size == bytes.len() && *hash == format!("{:x}", md5::compute(bytes))
         });
+        let validated_at = validated_address.map(|_| now());
         // Original/thumbnail URLs may be aliases of the same immutable source.
         // Validate the downloaded bytes before using the address, so a server
         // replacing a file at the same URL still goes through pixel comparison.
-        let addressed_entry = if let Some(address) = &address {
+        let addressed_entry = if let Some(address) = validated_address {
             let candidates = novel
                 .history
                 .iter()
@@ -439,9 +514,12 @@ impl Archive {
                 .find(|entry| entry.addressed_source == Some(true))
                 .copied()
                 .or_else(|| (candidates.len() == 1).then(|| candidates[0]));
-            if let Some(entry) = known.filter(|entry| exists(&entry.file)) {
+            if let Some(entry) = known.filter(|entry| intact_png(entry)) {
                 let mut entry = entry.clone();
                 entry.addressed_source = Some(true);
+                entry.source_validated_at = validated_at;
+                entry.source.clone_from(&source.url);
+                entry.kind.clone_from(&source.kind);
                 return Ok((entry, false));
             }
             known
@@ -464,8 +542,15 @@ impl Archive {
                 .iter()
                 .find(|e| e.hash == hash && known_file(e, novel))
         });
-        if let Some(entry) = previous.filter(|e| exists(&e.file)) {
-            return Ok((entry.clone(), false));
+        if let Some(entry) = previous.filter(|e| addressed_entry.is_none() && intact_png(e)) {
+            let mut entry = entry.clone();
+            if address.is_some() {
+                entry.addressed_source = Some(validated_address.is_some());
+                entry.source_validated_at = validated_at;
+                entry.source.clone_from(&source.url);
+                entry.kind.clone_from(&source.kind);
+            }
+            return Ok((entry, false));
         }
         let manifest_entry = self
             .manifest
@@ -486,7 +571,7 @@ impl Archive {
                 self.directory
                     .join(format!("{}_{hash}.png", saved_at.replace([':', '.'], "-")))
             });
-        let saved = !exists(&file);
+        let saved = destination.is_none_or(|entry| !intact_png(entry));
         if saved {
             let mut png = Vec::new();
             PngEncoder::new(&mut png).write_image(
@@ -506,15 +591,23 @@ impl Archive {
             height,
             kind: source.kind.clone(),
             source: source.url.clone(),
-            addressed_source: Some(address.is_some()),
+            addressed_source: Some(validated_address.is_some()),
+            source_validated_at: validated_at,
         };
+        self.remember(&entry)?;
+        Ok((entry, saved))
+    }
+
+    fn remember(&mut self, entry: &Entry) -> Result<()> {
+        if entry.file.parent() != Some(self.directory.as_path()) {
+            return Ok(());
+        }
         self.manifest.entries.retain(|old| old.hash != entry.hash);
         self.manifest.entries.push(entry.clone());
         atomic_write(
             &self.directory.join("archive.json"),
             &serde_json::to_vec_pretty(&self.manifest)?,
-        )?;
-        Ok((entry, saved))
+        )
     }
 }
 
@@ -545,6 +638,112 @@ mod tests {
             folder: "Book [1]".into(),
             ..Default::default()
         }
+    }
+
+    fn png(color: u8) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        PngEncoder::new(&mut bytes)
+            .write_image(&[color, 0, 0, 255], 1, 1, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        bytes
+    }
+
+    fn addressed_cover() -> (tempfile::TempDir, Novel, Source, Vec<u8>) {
+        let temp = tempfile::tempdir().unwrap();
+        let mut novel = tracked_book();
+        let bytes = png(8);
+        let source = Source {
+            kind: "original".into(),
+            url: format!(
+                "https://images.novelpia.com/imagebox/cover/{:x}_{}_q_ori.file",
+                md5::compute(&bytes),
+                bytes.len()
+            ),
+        };
+        let (entry, _) = Archive::open(&novel, temp.path())
+            .unwrap()
+            .save(&novel, &source, &bytes)
+            .unwrap();
+        novel.history.push(entry);
+        novel.latest_hash = Some(novel.history[0].hash.clone());
+        novel.sources.push(source.clone());
+        (temp, novel, source, bytes)
+    }
+
+    #[test]
+    fn reuses_recently_validated_png_without_a_successful_page_check() {
+        let (_temp, novel, source, _) = addressed_cover();
+
+        let cached = cached_cover(&novel, &source).expect("expected a verified cover");
+        assert_eq!(cached.file, novel.history[0].file);
+    }
+
+    #[test]
+    fn seeds_legacy_validation_from_a_successful_check_once() {
+        let (_temp, mut novel, source, _) = addressed_cover();
+        let old_check = (Utc::now() - chrono::TimeDelta::hours(1)).to_rfc3339();
+        let mut legacy = serde_json::to_value(&novel.history[0]).unwrap();
+        legacy.as_object_mut().unwrap().remove("sourceValidatedAt");
+        legacy["savedAt"] = serde_json::json!("2026-10-01T00:00:00Z");
+        novel.history[0] = serde_json::from_value(legacy).unwrap();
+        novel.last_check = Some(old_check.clone());
+        novel.failures = 1;
+        assert!(cached_cover(&novel, &source).is_none());
+        novel.failures = 0;
+
+        novel.history[0] = cached_cover(&novel, &source).expect("expected a migrated cover");
+        novel.last_check = Some(now());
+        let cached = cached_cover(&novel, &source).expect("expected a verified cover");
+        assert_eq!(
+            serde_json::to_value(cached).unwrap()["sourceValidatedAt"],
+            old_check
+        );
+    }
+
+    #[test]
+    fn expires_validation_even_after_a_successful_page_check() {
+        let (_temp, mut novel, source, _) = addressed_cover();
+        let mut stale = serde_json::to_value(&novel.history[0]).unwrap();
+        stale["sourceValidatedAt"] =
+            serde_json::json!((Utc::now() - chrono::TimeDelta::hours(25)).to_rfc3339());
+        novel.history[0] = serde_json::from_value(stale).unwrap();
+        novel.last_check = Some(now());
+
+        assert!(cached_cover(&novel, &source).is_none());
+    }
+
+    #[test]
+    fn rejects_missing_or_damaged_verified_png() {
+        let (_temp, novel, source, _) = addressed_cover();
+        let path = &novel.history[0].file;
+        let mut bytes = fs::read(path).unwrap();
+        let compressed_data = bytes.windows(4).position(|chunk| chunk == b"IDAT").unwrap() + 4;
+        bytes[compressed_data] ^= 0x80;
+        fs::write(path, bytes).unwrap();
+        assert!(cached_cover(&novel, &source).is_none());
+        fs::remove_file(path).unwrap();
+        assert!(cached_cover(&novel, &source).is_none());
+    }
+
+    #[test]
+    fn rejects_an_old_verified_entry_after_a_replacement_at_the_same_url() {
+        let (temp, mut novel, source, _) = addressed_cover();
+        let older = saved_cover(&novel, temp.path());
+        novel.history.insert(0, older);
+        let (replacement, _) = Archive::open(&novel, temp.path())
+            .unwrap()
+            .save(&novel, &source, &png(7))
+            .unwrap();
+        let dynamic = Source {
+            url: novel.history[0].source.clone(),
+            ..source.clone()
+        };
+        novel.history.retain(|entry| entry.hash != replacement.hash);
+        novel.history.push(replacement);
+
+        assert_eq!(novel.history[1].source, source.url);
+        assert!(cached_cover(&novel, &source).is_none());
+        assert!(cached_cover(&novel, &dynamic).is_none());
     }
 
     #[test]

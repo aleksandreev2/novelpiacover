@@ -161,7 +161,7 @@ async function checkInProgress(base) {
     })()`);
     const started = await call("check");
     assert.equal(started.checkProgress.total, 2);
-    await until(() => connections.length === 1, "The first check did not reach the local proxy");
+    await until(() => connections.length === 2, "Other titles could not start while the first request was held");
     await until(() => evaluate("document.querySelector('#monitor-status').textContent.includes('[0/2]')"), "Initial progress did not render");
     await until(() => evaluate("!!document.querySelector('.collection-card.checking[data-novel-id=\"434103\"]')"), "The active title was not highlighted");
     assert.equal(await evaluate("window.getSelection().toString()"), "Второй тайтл");
@@ -170,14 +170,12 @@ async function checkInProgress(base) {
     await until(async () => (await call("snapshot")).collectionLayout === "list", "Layout did not save while the network was held", 2500);
     const added = await call("add", "https://novelpia.com/novel/434104");
     assert.ok(added.novels.some((novel) => novel.id === "434104"));
-    assert.deepEqual(added.busy, ["434103"]);
-    assert.deepEqual(added.queued, ["434104", "391344"]);
+    assert.ok(added.busy.includes("434103") && added.busy.includes("391344"));
     assert.deepEqual(added.checkProgress, { completed: 0, total: 3 });
+    await until(async () => connections.length === 3 && (await call("snapshot")).busy.includes("434104"), "The added title did not use the free check slot");
     failRequest(0);
-    await until(async () => connections.length === 2 && (await call("snapshot")).busy.includes("434104"), "The newly added title was not checked next");
     await until(() => evaluate("document.querySelector('#monitor-status').textContent.includes('[1/3]')"), "The progress counter did not advance");
     failRequest(1);
-    await until(() => connections.length === 3, "The rest of the batch did not resume");
     failRequest(2);
     await until(async () => (await call("snapshot")).checkProgress === null, "Check progress did not clear");
     if (process.env.NOVELPIA_SMOKE_RECYCLE === "1") {

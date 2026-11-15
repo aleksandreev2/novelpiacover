@@ -1,8 +1,8 @@
 use crate::{
     archive::{self, Archive},
     model::{
-        atomic_write, label, now, Activity, Cover, Novel, Policy, Profile, Rename, Store,
-        Transition, STATUSES,
+        atomic_write, label, now, Activity, Cover, CoverVerification, Entry, Novel, Policy,
+        Profile, Rename, Store, Transition, STATUSES,
     },
     novelpia::{inspect_page, parse_novel_url, safe_folder, Client, FetchError},
 };
@@ -10,14 +10,16 @@ use anyhow::{anyhow, bail, Context, Result};
 use chrono::Utc;
 use serde_json::{json, Value};
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{BTreeMap, HashSet, VecDeque},
     fs,
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
     },
 };
+
+const CHECK_WORKERS: usize = 3;
 
 pub struct Notice {
     pub id: Option<String>,
@@ -30,6 +32,7 @@ pub struct Monitor {
     store: Mutex<Store>,
     client: Client,
     checks: Mutex<Checks>,
+    check_available: Condvar,
     archive_write: Mutex<()>,
     revision: AtomicU64,
     preview_gate: Mutex<()>,
@@ -41,25 +44,31 @@ struct CheckJob {
     id: String,
     automatic: bool,
     adding: bool,
+    force_images: bool,
+}
+
+enum CheckedCover {
+    Cached(Entry),
+    Downloaded(Vec<u8>),
 }
 
 #[derive(Default)]
 struct Checks {
     pending: VecDeque<CheckJob>,
-    current: Option<String>,
+    current: BTreeMap<String, bool>,
     completed: usize,
     running: bool,
-    cancelled: bool,
     stopping: bool,
 }
 
 impl Checks {
     fn enqueue(&mut self, job: CheckJob) {
-        if self.stopping || (!self.cancelled && self.current.as_ref() == Some(&job.id)) {
+        if self.stopping || self.current.get(&job.id) == Some(&false) {
             return;
         }
         if let Some(queued) = self.pending.iter_mut().find(|queued| queued.id == job.id) {
             queued.automatic &= job.automatic;
+            queued.force_images |= job.force_images;
             return;
         }
         if job.adding {
@@ -78,6 +87,7 @@ impl Monitor {
             store: Mutex::new(store),
             client: Client::new()?,
             checks: Mutex::new(Checks::default()),
+            check_available: Condvar::new(),
             archive_write: Mutex::new(()),
             revision: AtomicU64::new(0),
             preview_gate: Mutex::new(()),
@@ -101,6 +111,7 @@ impl Monitor {
         let mut checks = self.checks.lock().unwrap();
         checks.stopping = true;
         checks.pending.clear();
+        self.check_available.notify_all();
     }
 
     pub fn drain_notices(&self) -> Vec<Notice> {
@@ -111,14 +122,13 @@ impl Monitor {
         let store = self.store.lock().unwrap();
         let mut state = serde_json::to_value(&store.profile).expect("profile JSON");
         let checks = self.checks.lock().unwrap();
-        let total = checks.completed
-            + checks.pending.len()
-            + usize::from(checks.current.is_some() && !checks.cancelled);
-        state["busy"] = json!(checks
+        let busy: Vec<_> = checks
             .current
             .iter()
-            .filter(|_| !checks.cancelled)
-            .collect::<Vec<_>>());
+            .filter_map(|(id, cancelled)| (!cancelled).then_some(id))
+            .collect();
+        let total = checks.completed + checks.pending.len() + busy.len();
+        state["busy"] = json!(busy);
         state["queued"] = json!(checks.pending.iter().map(|job| &job.id).collect::<Vec<_>>());
         state["checkProgress"] = if total == 0 {
             Value::Null
@@ -169,6 +179,7 @@ impl Monitor {
                             id: novel.id.clone(),
                             automatic: false,
                             adding: false,
+                            force_images: id.is_some(),
                         });
                     }
                 }
@@ -202,6 +213,7 @@ impl Monitor {
                     id,
                     automatic: false,
                     adding: true,
+                    force_images: true,
                 });
             }
             "remove" => self.remove(&payload)?,
@@ -254,6 +266,7 @@ impl Monitor {
             }
             _ => bail!("Неизвестное действие."),
         }
+        self.check_available.notify_all();
         self.changed();
         Ok(self.snapshot())
     }
@@ -294,6 +307,7 @@ impl Monitor {
             let mut event = Activity::new(&novel, "watch_removed", now());
             if delete_archive {
                 novel.history.clear();
+                novel.cover_verifications.clear();
                 novel.latest_hash = None;
                 novel.last_saved = 0;
                 event.archive_deleted = true;
@@ -319,8 +333,8 @@ impl Monitor {
         }
         let mut checks = self.checks.lock().unwrap();
         checks.pending.retain(|job| job.id != id);
-        if checks.current.as_deref() == Some(id) {
-            checks.cancelled = true;
+        if let Some(cancelled) = checks.current.get_mut(id) {
+            *cancelled = true;
         }
         Ok(())
     }
@@ -344,6 +358,7 @@ impl Monitor {
                         id: novel.id.clone(),
                         automatic: true,
                         adding: false,
+                        force_images: false,
                     });
                 }
             }
@@ -355,14 +370,22 @@ impl Monitor {
         self.run_checks_with(|url, image| self.client.fetch(url, image))
     }
 
-    fn current_check_cancelled(&self) -> bool {
+    fn current_check_cancelled(&self, id: &str) -> bool {
         let checks = self.checks.lock().unwrap();
-        checks.cancelled || checks.stopping
+        checks.stopping || checks.current.get(id) == Some(&true)
     }
 
     fn run_checks_with(
         &self,
-        fetch: impl Fn(&str, bool) -> std::result::Result<Vec<u8>, FetchError>,
+        fetch: impl Fn(&str, bool) -> std::result::Result<Vec<u8>, FetchError> + Sync,
+    ) -> Result<()> {
+        self.run_checks_with_limit(CHECK_WORKERS, fetch)
+    }
+
+    fn run_checks_with_limit(
+        &self,
+        limit: usize,
+        fetch: impl Fn(&str, bool) -> std::result::Result<Vec<u8>, FetchError> + Sync,
     ) -> Result<()> {
         {
             let mut checks = self.checks.lock().unwrap();
@@ -373,20 +396,58 @@ impl Monitor {
         }
         let mut result = Ok(());
         loop {
-            let job = {
-                let mut checks = self.checks.lock().unwrap();
-                let job = checks.pending.pop_front();
-                if let Some(job) = &job {
-                    checks.current = Some(job.id.clone());
-                    checks.cancelled = false;
-                } else {
-                    checks.running = false;
-                    checks.completed = 0;
+            std::thread::scope(|scope| {
+                let workers = (0..limit)
+                    .map(|_| scope.spawn(|| self.run_check_worker(&fetch)))
+                    .collect::<Vec<_>>();
+                for worker in workers {
+                    if let Err(error) = worker.join().unwrap() {
+                        result = Err(error);
+                    }
                 }
-                job
-            };
+            });
+            let mut checks = self.checks.lock().unwrap();
+            if checks.pending.is_empty() {
+                checks.running = false;
+                checks.completed = 0;
+                drop(checks);
+                self.changed();
+                return result;
+            }
+            // A job may arrive after the idle workers have just exited.
+        }
+    }
+
+    fn take_check(&self) -> Option<CheckJob> {
+        let mut checks = self.checks.lock().unwrap();
+        loop {
+            if checks.stopping {
+                return None;
+            }
+            // A re-added title can queue while a removed instance winds down.
+            if let Some(index) = checks
+                .pending
+                .iter()
+                .position(|job| !checks.current.contains_key(&job.id))
+            {
+                let job = checks.pending.remove(index).unwrap();
+                checks.current.insert(job.id.clone(), false);
+                return Some(job);
+            }
+            if checks.current.is_empty() {
+                return None;
+            }
+            checks = self.check_available.wait(checks).unwrap();
+        }
+    }
+
+    fn run_check_worker(
+        &self,
+        fetch: &impl Fn(&str, bool) -> std::result::Result<Vec<u8>, FetchError>,
+    ) -> Result<()> {
+        let mut result = Ok(());
+        while let Some(job) = self.take_check() {
             self.changed();
-            let Some(job) = job else { return result };
             let novel = {
                 let store = self.store.lock().unwrap();
                 let profile = &store.profile;
@@ -403,40 +464,54 @@ impl Monitor {
             };
             let attempted = novel.is_some();
             if let Some(novel) = novel {
-                if let Err(error) = self.perform_check(novel, job.adding, &fetch) {
+                if let Err(error) = self.perform_check(novel, job.adding, job.force_images, fetch) {
                     result = Err(error);
                 }
             }
             {
                 let mut checks = self.checks.lock().unwrap();
-                checks.current = None;
-                if attempted && !checks.cancelled && !checks.stopping {
+                let cancelled = checks.current.remove(&job.id) == Some(true);
+                if attempted && !cancelled && !checks.stopping {
                     checks.completed += 1;
                 }
+                self.check_available.notify_all();
             }
             self.changed();
         }
+        result
     }
 
     fn perform_check(
         &self,
         mut novel: Novel,
         adding: bool,
+        force_images: bool,
         fetch: impl Fn(&str, bool) -> std::result::Result<Vec<u8>, FetchError>,
     ) -> Result<()> {
-        if self.current_check_cancelled() {
+        if self.current_check_cancelled(&novel.id) {
             return Ok(());
         }
         let response = match fetch(&novel.url, false) {
             Ok(page) => {
                 let data = inspect_page(&String::from_utf8_lossy(&page));
                 let mut images = Vec::with_capacity(data.sources.len());
-                for source in &data.sources {
-                    if self.current_check_cancelled() {
+                // Start with the smaller regular cover; keep original-first
+                // order when selecting the archive's preferred preview.
+                for source in data.sources.iter().rev() {
+                    if self.current_check_cancelled(&novel.id) {
                         return Ok(());
                     }
-                    images.push(fetch(&source.url, true));
+                    let cached = if force_images {
+                        None
+                    } else {
+                        archive::cached_cover(&novel, source)
+                    };
+                    images.push(match cached {
+                        Some(entry) => Ok(CheckedCover::Cached(entry)),
+                        None => fetch(&source.url, true).map(CheckedCover::Downloaded),
+                    });
                 }
+                images.reverse();
                 Ok((data, images))
             }
             Err(error) => Err(error),
@@ -445,7 +520,7 @@ impl Monitor {
         let _archive_write = self.archive_write.lock().unwrap();
         let root = {
             let store = self.store.lock().unwrap();
-            if self.current_check_cancelled()
+            if self.current_check_cancelled(&novel.id)
                 || !store.profile.novels.iter().any(|n| n.id == novel.id)
             {
                 return Ok(());
@@ -509,6 +584,9 @@ impl Monitor {
                         })?;
                     }
                     novel.sources = data.sources;
+                    novel
+                        .cover_verifications
+                        .retain(|url, _| novel.sources.iter().any(|source| &source.url == url));
                     match Archive::open(&novel, &root) {
                         Err(error) => errors.push(error.to_string()),
                         Ok(mut archive) => {
@@ -540,8 +618,27 @@ impl Monitor {
                                         continue;
                                     }
                                 };
-                                match archive.save(&novel, source, &image) {
+                                let cached = matches!(image, CheckedCover::Cached(_));
+                                let saved = match image {
+                                    CheckedCover::Cached(entry) => Ok((entry, false)),
+                                    CheckedCover::Downloaded(bytes) => {
+                                        archive.save(&novel, source, &bytes)
+                                    }
+                                };
+                                match saved {
                                     Ok((entry, saved)) => {
+                                        let verified = (cached
+                                            || (entry.source == source.url
+                                                && entry.addressed_source == Some(true)))
+                                        .then(|| entry.source_validated_at.clone())
+                                        .flatten()
+                                        .map(|at| CoverVerification {
+                                            hash: entry.hash.clone(),
+                                            at,
+                                        });
+                                        novel
+                                            .cover_verifications
+                                            .insert(source.url.clone(), verified);
                                         if latest.is_none() {
                                             latest = Some(entry.hash.clone());
                                         }
@@ -822,6 +919,73 @@ mod tests {
     use super::*;
 
     #[test]
+    fn batch_starts_other_titles_while_one_request_is_stalled() {
+        use std::{
+            sync::{mpsc, Condvar},
+            thread,
+            time::Duration,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let monitor = Monitor::open(dir.path().join("profile")).unwrap();
+        let root = dir.path().join("archive");
+        fs::create_dir(&root).unwrap();
+        monitor
+            .update(|profile| {
+                profile.root = root;
+                for id in 1..=4 {
+                    profile.novels.push(Novel {
+                        id: id.to_string(),
+                        url: format!("https://novelpia.com/novel/{id}"),
+                        ..Default::default()
+                    });
+                }
+                Ok(())
+            })
+            .unwrap();
+        monitor.action("check", Value::Null).unwrap();
+        let (started, requests) = mpsc::channel();
+        let release = (Mutex::new(false), Condvar::new());
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                monitor
+                    .run_checks_with(|url, _| {
+                        started.send(url.to_owned()).unwrap();
+                        let (lock, wake) = &release;
+                        drop(
+                            wake.wait_while(lock.lock().unwrap(), |ready| !*ready)
+                                .unwrap(),
+                        );
+                        Ok(Vec::new())
+                    })
+                    .unwrap()
+            });
+
+            let concurrent = (0..3)
+                .filter_map(|_| requests.recv_timeout(Duration::from_secs(2)).ok())
+                .count();
+            let fourth_started = requests.try_recv().is_ok();
+            let progress = monitor.snapshot()["checkProgress"].clone();
+            *release.0.lock().unwrap() = true;
+            release.1.notify_all();
+            assert_eq!(
+                concurrent, 3,
+                "a stalled request should leave two slots for other titles"
+            );
+            assert!(
+                !fourth_started,
+                "do not start an unbounded number of requests"
+            );
+            assert_eq!(progress, json!({"completed": 0, "total": 4}));
+        });
+        assert!(monitor.snapshot()["novels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|novel| novel["lastCheck"].is_string()));
+    }
+
+    #[test]
     fn collection_settings_and_add_complete_while_a_check_waits_for_the_page() {
         use std::{sync::mpsc, thread, time::Duration};
 
@@ -843,16 +1007,17 @@ mod tests {
             .unwrap();
         let (fetching, started) = mpsc::channel();
         let (release, released) = mpsc::channel();
+        let released = Mutex::new(released);
         let (saved, finished) = mpsc::channel();
         monitor.action("check", json!("1")).unwrap();
         thread::scope(|scope| {
             let monitor = &monitor;
             scope.spawn(move || {
                 monitor
-                    .run_checks_with(|url, _| {
+                    .run_checks_with_limit(1, |url, _| {
                         if url.ends_with("/1") {
                             fetching.send(()).unwrap();
-                            released.recv().unwrap();
+                            released.lock().unwrap().recv().unwrap();
                         }
                         Ok(Vec::new())
                     })
@@ -913,15 +1078,16 @@ mod tests {
 
         let (started, waiting) = mpsc::channel();
         let (release, released) = mpsc::channel();
+        let released = Mutex::new(released);
         thread::scope(|scope| {
             let monitor = &monitor;
             scope.spawn(move || {
-                let first = std::cell::Cell::new(true);
+                let first = std::sync::atomic::AtomicBool::new(true);
                 monitor.run_checks_with(|_, image| {
                     assert!(!image, "a cancelled check must not start an image request");
-                    let page = if first.replace(false) {
+                    let page = if first.swap(false, Ordering::Relaxed) {
                         started.send(()).unwrap();
-                        released.recv().unwrap();
+                        released.lock().unwrap().recv().unwrap();
                         r#"<div class="epnew-novel-title">Старый ответ</div><img class="cover_img" src="//images.novelpia.com/imagebox/cover/demo.file">"#
                     } else {
                         r#"<div class="epnew-novel-title">Актуальный ответ</div>"#
@@ -955,6 +1121,103 @@ mod tests {
     }
 
     #[test]
+    fn bulk_check_skips_verified_images_but_single_check_downloads_them() {
+        use image::ImageEncoder;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("archive");
+        fs::create_dir(&root).unwrap();
+        let monitor = Monitor::open(dir.path().join("profile")).unwrap();
+        monitor.action("settings", json!({"root": root})).unwrap();
+        monitor
+            .action("add", json!("https://novelpia.com/novel/1"))
+            .unwrap();
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&[7, 0, 0, 255], 1, 1, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        let address = format!("{:x}_{}_ori.file", md5::compute(&png), png.len());
+        let page = format!(
+            r#"<div class="epnew-novel-title">Book</div><img class="cover_img" src="//images.novelpia.com/imagebox/cover/{address}">"#
+        );
+        let requests = AtomicU64::new(0);
+        let fetch = |_: &str, image: bool| {
+            if image {
+                requests.fetch_add(1, Ordering::Relaxed);
+                Ok(png.clone())
+            } else {
+                Ok(page.as_bytes().to_vec())
+            }
+        };
+        monitor.run_checks_with(fetch).unwrap();
+        assert_eq!(requests.load(Ordering::Relaxed), 1);
+        let before = monitor.snapshot()["activitySequence"].clone();
+        monitor.action("check", Value::Null).unwrap();
+        monitor.run_checks_with(fetch).unwrap();
+        assert_eq!(requests.load(Ordering::Relaxed), 1);
+        assert_eq!(monitor.snapshot()["activitySequence"], before);
+
+        monitor.action("check", json!("1")).unwrap();
+        monitor.run_checks_with(fetch).unwrap();
+        assert_eq!(requests.load(Ordering::Relaxed), 2);
+        assert_eq!(monitor.snapshot()["activitySequence"], before);
+    }
+
+    #[test]
+    fn thumbnail_dedup_does_not_clear_a_replacement_seen_at_the_original_url() {
+        use image::ImageEncoder;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("archive");
+        fs::create_dir(&root).unwrap();
+        let monitor = Monitor::open(dir.path().join("profile")).unwrap();
+        monitor.action("settings", json!({"root": root})).unwrap();
+        monitor
+            .action("add", json!("https://novelpia.com/novel/1"))
+            .unwrap();
+        let png = |color| {
+            let mut bytes = Vec::new();
+            image::codecs::png::PngEncoder::new(&mut bytes)
+                .write_image(&[color, 0, 0, 255], 1, 1, image::ExtendedColorType::Rgba8)
+                .unwrap();
+            bytes
+        };
+        let old = png(7);
+        let replacement = png(8);
+        let original = format!("{:x}_{}_q_ori.file", md5::compute(&old), old.len());
+        let thumbnail = format!(
+            "{:x}_{}_ori.file",
+            md5::compute(&replacement),
+            replacement.len()
+        );
+        let page = format!(
+            r#"<div class="epnew-novel-title">Book</div><a href="//images.novelpia.com/imagebox/cover/{original}"><img class="cover_img" src="//images.novelpia.com/imagebox/cover/{thumbnail}"></a>"#
+        );
+        let replaced = std::sync::atomic::AtomicBool::new(false);
+        let original_requests = AtomicU64::new(0);
+        let fetch = |url: &str, image: bool| {
+            if !image {
+                return Ok(page.as_bytes().to_vec());
+            }
+            if url.ends_with(&original) {
+                original_requests.fetch_add(1, Ordering::Relaxed);
+                if !replaced.load(Ordering::Relaxed) {
+                    return Ok(old.clone());
+                }
+            }
+            Ok(replacement.clone())
+        };
+        monitor.run_checks_with(fetch).unwrap();
+        replaced.store(true, Ordering::Relaxed);
+        monitor.action("check", json!("1")).unwrap();
+        monitor.run_checks_with(fetch).unwrap();
+        let preferred = monitor.snapshot()["novels"][0]["latestHash"].clone();
+
+        monitor.action("check", Value::Null).unwrap();
+        monitor.run_checks_with(fetch).unwrap();
+        assert_eq!(original_requests.load(Ordering::Relaxed), 3);
+        assert_eq!(monitor.snapshot()["novels"][0]["latestHash"], preferred);
+    }
+
+    #[test]
     fn first_capture_is_silent_then_rename_status_and_replacement_are_logged() {
         let dir = tempfile::tempdir().unwrap();
         let monitor = Monitor::open(dir.path().join("profile")).unwrap();
@@ -979,7 +1242,7 @@ mod tests {
                 .write_image(&[color, 0, 0, 255], 1, 1, image::ExtendedColorType::Rgba8)
                 .unwrap();
             let novel = monitor.store.lock().unwrap().profile.novels[0].clone();
-            monitor.perform_check(novel, adding, |_, image| {
+            monitor.perform_check(novel, adding, true, |_, image| {
                 Ok(if image { png.clone() } else {
                     format!(r#"<div class="epnew-novel-title">{title}</div><div class="epnew-writer"><p class="in-writer">Author</p><p class="in-badge"><span>PLUS</span>{badge}</p></div><img class="cover_img" src="//images.novelpia.com/imagebox/cover/demo.file">"#).into_bytes()
                 })

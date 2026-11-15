@@ -1,9 +1,9 @@
 use std::{
     cell::RefCell,
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt,
     io::Read,
-    sync::LazyLock,
+    sync::{LazyLock, Mutex},
     time::{Duration, Instant},
 };
 
@@ -742,7 +742,10 @@ pub fn inspect_page(input: &str) -> Page {
     }
 }
 
-pub struct Client(reqwest::blocking::Client);
+pub struct Client {
+    http: reqwest::blocking::Client,
+    retry_at: Mutex<HashMap<String, Instant>>,
+}
 
 #[derive(Debug)]
 pub struct FetchError {
@@ -769,13 +772,15 @@ impl std::error::Error for FetchError {}
 
 impl Client {
     pub fn new() -> Result<Self> {
-        Ok(Self(
-            reqwest::blocking::Client::builder()
+        Ok(Self {
+            http: reqwest::blocking::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .referer(false)
-                .user_agent("NovelpiaCover/2.0")
+                .connect_timeout(Duration::from_secs(8))
+                .user_agent(concat!("NovelpiaCover/", env!("CARGO_PKG_VERSION")))
                 .build()?,
-        ))
+            retry_at: Mutex::new(HashMap::new()),
+        })
     }
 
     pub fn fetch(&self, input: &str, image: bool) -> Result<Vec<u8>, FetchError> {
@@ -795,12 +800,26 @@ impl Client {
             ("text/html", MAX_PAGE_BYTES)
         };
         for redirect in 0..=MAX_REDIRECTS {
+            let host = url.host_str().expect("validated Novelpia host");
+            if let Some(wait) = self
+                .retry_at
+                .lock()
+                .unwrap()
+                .get(host)
+                .and_then(|until| until.checked_duration_since(Instant::now()))
+            {
+                return Err(FetchError {
+                    message: "Novelpia попросила подождать. Проверка повторится автоматически."
+                        .into(),
+                    retry_after_ms: wait.as_millis().max(1) as u64,
+                });
+            }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(FetchError::new(TIMEOUT_ERROR));
             }
             let mut response = self
-                .0
+                .http
                 .get(url.clone())
                 .timeout(remaining)
                 .header(ACCEPT, accept)
@@ -808,7 +827,9 @@ impl Client {
                 .header(REFERER, BASE)
                 .send()
                 .map_err(|error| {
-                    if error.is_timeout() {
+                    if error.is_timeout() && error.is_connect() {
+                        FetchError::new("Не удалось вовремя подключиться к Novelpia.")
+                    } else if error.is_timeout() {
                         FetchError::new(TIMEOUT_ERROR)
                     } else {
                         FetchError::new("Не удалось получить ответ Novelpia.")
@@ -849,6 +870,14 @@ impl Client {
                         .get(RETRY_AFTER)
                         .and_then(|value| value.to_str().ok());
                     error.retry_after_ms = retry_after_ms(value, Utc::now());
+                    if status == 429 || value.is_some() {
+                        let until = Instant::now() + Duration::from_millis(error.retry_after_ms);
+                        let mut retry_at = self.retry_at.lock().unwrap();
+                        retry_at
+                            .entry(host.to_owned())
+                            .and_modify(|old| *old = (*old).max(until))
+                            .or_insert(until);
+                    }
                 }
                 return Err(error);
             }

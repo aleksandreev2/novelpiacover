@@ -89,6 +89,8 @@ pub struct Entry {
     pub source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub addressed_source: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_validated_at: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -128,6 +130,12 @@ pub struct Rename {
     pub at: String,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CoverVerification {
+    pub hash: String,
+    pub at: String,
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Novel {
@@ -137,6 +145,8 @@ pub struct Novel {
     pub folder: String,
     pub history: Vec<Entry>,
     pub sources: Vec<Source>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub cover_verifications: BTreeMap<String, Option<CoverVerification>>,
     pub latest_hash: Option<String>,
     pub next_check: i64,
     pub last_check: Option<String>,
