@@ -1331,6 +1331,32 @@ button.ranobe-title {
   opacity: 0.55;
   cursor: wait;
 }
+.ranobe-diagnostics {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+.ranobe-diagnostics summary {
+  width: fit-content;
+  font-weight: 600;
+  cursor: pointer;
+}
+.ranobe-report {
+  display: grid;
+  justify-items: start;
+  gap: 10px;
+  margin-top: 10px;
+}
+.ranobe-report textarea {
+  width: 100%;
+  min-height: 7em;
+  padding: 10px;
+  color: inherit;
+  background: var(--field);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: 13px/1.5 Consolas, monospace;
+  resize: vertical;
+}
 .ranobe-schedule-note {
   grid-area: note;
   color: var(--warning);

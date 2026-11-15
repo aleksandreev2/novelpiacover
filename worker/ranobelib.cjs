@@ -25,10 +25,28 @@ const MESSAGES = {
 };
 
 class WorkerError extends Error {
-	constructor(code, message = MESSAGES[code]) {
+	constructor(code, message = MESSAGES[code], context = {}) {
 		super(message);
 		this.code = code;
+		this.context = context;
 	}
+}
+
+function tagError(error, context) {
+	if (error instanceof WorkerError) error.context = { ...context, ...error.context };
+	return error;
+}
+
+async function atStage(stage, run, context = {}) {
+	try {
+		return await run();
+	} catch (error) {
+		throw tagError(error, { stage, ...context });
+	}
+}
+
+function diagnostic(error) {
+	return { stage: 'worker', ...error.context, code: error.code, message: error.message };
 }
 
 function safeId(value) {
@@ -58,41 +76,42 @@ async function readAll(get, url, paginated = false) {
 		const requestUrl = new URL(url);
 		if (paginated || page > 1) requestUrl.searchParams.set('page', String(page));
 		if (seed) requestUrl.searchParams.set('seed', seed);
-		const result = await get(requestUrl);
-		if (!Array.isArray(result?.data)) throw new WorkerError('schema');
+		const result = await get(requestUrl).catch(error => { throw tagError(error, { page }); });
+		const invalid = message => new WorkerError('schema', message, { page });
+		if (!Array.isArray(result?.data)) throw invalid('В ответе RanobeLIB нет списка записей.');
 		rows.push(...result.data);
 		const meta = result.meta;
 		const hasPageInfo = meta?.current_page !== undefined || meta?.last_page !== undefined || meta?.has_next_page !== undefined;
 		if (!paginated && !hasPageInfo && result.links?.next == null) return rows;
-		if (safeId(meta?.current_page) !== page) throw new WorkerError('schema');
+		if (String(meta?.current_page) !== String(page)) throw invalid('В ответе указан неверный номер страницы.');
 
 		let hasNext = meta.has_next_page;
 		if (meta.last_page !== undefined) {
 			const lastPage = safeId(meta.last_page);
 			if (lastPage > 100 || page > lastPage || (pageCount && pageCount !== lastPage)) {
-				throw new WorkerError('schema');
+				throw invalid('Число страниц изменилось во время проверки.');
 			}
-			if (hasNext !== undefined && hasNext !== (page < lastPage)) throw new WorkerError('schema');
+			if (hasNext !== undefined && hasNext !== (page < lastPage)) throw invalid('Данные о следующей странице противоречат друг другу.');
 			pageCount = lastPage;
 			hasNext = page < lastPage;
 		}
-		if (typeof hasNext !== 'boolean') throw new WorkerError('schema');
+		if (typeof hasNext !== 'boolean') throw invalid('В ответе нет признака следующей страницы.');
 		// Keep the ordering from page one and build every URL with the original filters.
 		if (page === 1 && paginated && typeof meta.seed === 'string' && meta.seed) seed = meta.seed;
 		if (meta.total !== undefined) {
 			const currentTotal = Number(meta.total);
 			if (!Number.isSafeInteger(currentTotal) || currentTotal < 0 || (total !== undefined && total !== currentTotal)) {
-				throw new WorkerError('schema');
+				throw invalid('Число записей изменилось во время проверки.');
 			}
 			total = currentTotal;
 		}
-		if ((hasNext || page > 1) && result.data.length === 0) throw new WorkerError('schema');
+		if ((hasNext || page > 1) && result.data.length === 0) throw invalid('RanobeLIB вернул пустую страницу внутри списка.');
 		if (!hasNext) {
-			if (total !== undefined && total !== rows.length) throw new WorkerError('schema');
+			if (total !== undefined && total !== rows.length) throw invalid('В загруженном списке не хватает записей.');
 			return rows;
 		}
 	}
-	throw new WorkerError('schema');
+	throw new WorkerError('schema', 'В списке больше 100 страниц.');
 }
 
 async function readCatalog(get, status) {
@@ -104,7 +123,8 @@ async function readCatalog(get, status) {
 		const slug = [row.slug_url, row.slug].find(value => typeof value === 'string' && value.startsWith(prefix) && SLUG.test(value.slice(prefix.length)))
 			?? (typeof row.slug === 'string' && SLUG.test(row.slug) ? prefix + row.slug : undefined);
 		const title = [row.rus_name, row.name, row.eng_name].find(value => typeof value === 'string' && value.trim());
-		if (!slug || !title || seen.has(id)) throw new WorkerError('schema');
+		if (!slug || !title) throw new WorkerError('schema', 'В каталоге отсутствует название или ссылка тайтла.', { titleId: id });
+		if (seen.has(id)) throw new WorkerError('schema', 'Один тайтл повторяется на страницах каталога.', { titleId: id });
 		seen.add(id);
 		return { id, slug, title: title.trim(), status };
 	});
@@ -115,43 +135,45 @@ function publicationTime(value) {
 	// show an upcoming release. A missing branch or malformed date invalidates the count.
 	if (value == null) return undefined;
 	if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) {
-		throw new WorkerError('schema');
+		throw new WorkerError('schema', 'У главы некорректная дата запланированной публикации.');
 	}
 	const millis = Date.parse(value);
-	if (!Number.isFinite(millis)) throw new WorkerError('schema');
+	if (!Number.isFinite(millis)) throw new WorkerError('schema', 'У главы некорректная дата запланированной публикации.');
 	return millis;
 }
 
 function teamIds(record) {
-	if (!Array.isArray(record.teams)) throw new WorkerError('schema');
+	if (!Array.isArray(record.teams)) throw new WorkerError('schema', 'RanobeLIB не указал список команд для ветки или главы.');
 	return record.teams.map(team => safeId(team?.id));
 }
 
-async function readObservation(get, item, now) {
+async function readBranchTeams(get, item) {
 	const branchRows = await readAll(get, new URL(`/api/branches/${item.id}`, API_ORIGIN));
 	const branchTeams = new Map();
-	let shared = false;
 	for (const row of branchRows) {
 		const id = safeId(row?.id);
-		if (branchTeams.has(id)) throw new WorkerError('schema');
-		const teams = teamIds(row);
-		branchTeams.set(id, teams);
-		if (teams.some(id => id !== TEAM_ID)) shared = true;
+		if (branchTeams.has(id)) throw new WorkerError('schema', 'Одна ветка повторяется в списке.');
+		branchTeams.set(id, teamIds(row));
 	}
+	return branchTeams;
+}
 
+async function readChapterSchedule(get, item, now, branchTeams) {
 	const chapterRows = await readAll(get, new URL(`/api/manga/${encodeURIComponent(item.slug)}/chapters`, API_ORIGIN));
+	if (chapterRows.length === 0) throw new WorkerError('schema', 'RanobeLIB вернул пустой список глав.');
+	let shared = [...branchTeams.values()].some(teams => teams.some(id => id !== TEAM_ID));
 	let ownsChapters = false;
 	let earliestFuture = Infinity;
 	let lastRelease = -Infinity;
 	const scheduled = new Set();
 	for (const row of chapterRows) {
 		const chapterId = safeId(row?.id);
-		if (!Array.isArray(row.branches) || row.branches.length === 0) throw new WorkerError('schema');
+		if (!Array.isArray(row.branches) || row.branches.length === 0) throw new WorkerError('schema', 'У главы нет данных о ветке или команде.');
 		for (const branch of row.branches) {
 			// RanobeLIB stores team attribution on the chapter when it has no separate branch.
 			const unbranched = branch?.branch_id === null;
 			const teams = unbranched ? teamIds(branch) : branchTeams.get(safeId(branch?.branch_id));
-			if (!teams) throw new WorkerError('schema');
+			if (!teams) throw new WorkerError('schema', 'В списке глав обнаружена неизвестная ветка.');
 			if (unbranched && teams.some(id => id !== TEAM_ID)) shared = true;
 			if (!teams.includes(TEAM_ID)) continue;
 			ownsChapters = true;
@@ -177,9 +199,15 @@ async function readObservation(get, item, now) {
 	};
 }
 
+async function readObservation(get, item, now) {
+	const title = { titleId: item.id };
+	const branches = await atStage('branches', () => readBranchTeams(get, item), title);
+	return atStage('chapters', () => readChapterSchedule(get, item, now, branches), title);
+}
+
 async function scanTeam(get, input, now = new Date()) {
-	const ongoing = await readCatalog(get, 'ongoing');
-	const completed = await readCatalog(get, 'completed');
+	const ongoing = await atStage('catalog-ongoing', () => readCatalog(get, 'ongoing'));
+	const completed = await atStage('catalog-completed', () => readCatalog(get, 'completed'));
 	const completedIds = new Set(completed.map(item => item.id));
 	const knownById = new Map(input.known.map(item => [item.id, item]));
 	const items = ongoing.filter(item => !completedIds.has(item.id)).concat(completed);
@@ -200,7 +228,9 @@ async function scanTeam(get, input, now = new Date()) {
 			const item = due[nextTitle++];
 			try {
 				// Repeated transport failures indicate the service is unavailable.
-				if (consecutiveNetworkErrors >= 3) throw new WorkerError('network');
+				if (consecutiveNetworkErrors >= 3) {
+					throw new WorkerError('network', 'Тайтл отложен после повторных ошибок сети.', { stage: 'queue', titleId: item.id });
+				}
 				item.observation = await readObservation(guardedGet, item, now);
 				consecutiveNetworkErrors = 0;
 			} catch (error) {
@@ -214,6 +244,7 @@ async function scanTeam(get, input, now = new Date()) {
 					checkedAt: now.toISOString(),
 					nextCheckAt: new Date(now.getTime() + 15 * MINUTE).toISOString(),
 					message: error.message,
+					diagnostic: diagnostic(error),
 				};
 			}
 		}
@@ -253,16 +284,17 @@ function apiReader(read, wait = sleep) {
 			let delay;
 			try {
 				const status = response.status();
-				if (status === 401 || status === 403) throw new WorkerError('login_required');
+				const http = { httpStatus: status };
+				if (status === 401 || status === 403) throw new WorkerError('login_required', undefined, http);
 				if (status === 429 || status >= 500) {
 					delay = retryDelay(response.headers()['retry-after']);
-					if (attempt !== 0 || delay > 3000) throw new WorkerError(status === 429 ? 'rate_limited' : 'network');
+					if (attempt !== 0 || delay > 3000) throw new WorkerError(status === 429 ? 'rate_limited' : 'network', undefined, http);
 				} else {
-					if (status !== 200) throw new WorkerError('schema');
+					if (status !== 200) throw new WorkerError('schema', `RanobeLIB ответил кодом HTTP ${status}.`, http);
 					try {
 						return await response.json();
 					} catch {
-						throw new WorkerError('schema');
+						throw new WorkerError('schema', 'Ответ RanobeLIB не удалось прочитать как JSON.', http);
 					}
 				}
 			} finally {
@@ -327,9 +359,11 @@ async function accountVisible(page) {
 async function openTeamPage(page) {
 	try {
 		const response = await page.goto(TEAM_URL, { waitUntil: 'domcontentloaded', timeout: 18_000 });
-		if (response?.status() === 429) throw new WorkerError('rate_limited');
-		if (response?.status() >= 500) throw new WorkerError('network');
-		if (response?.status() >= 400) throw new WorkerError('schema');
+		const status = response?.status();
+		const http = { httpStatus: status };
+		if (status === 429) throw new WorkerError('rate_limited', undefined, http);
+		if (status >= 500) throw new WorkerError('network', undefined, http);
+		if (status >= 400) throw new WorkerError('schema', `Страница команды ответила кодом HTTP ${status}.`, http);
 		const url = new URL(page.url());
 		if (url.origin !== WEB_ORIGIN) throw new WorkerError('login_required');
 	} catch (error) {
@@ -355,7 +389,7 @@ async function waitForTeamEdit(page) {
 async function runBrowser(command, profilePath, request, signal) {
 	signal.throwIfAborted();
 	const headless = command === 'scan';
-	const context = await launchBrowser(profilePath, headless);
+	const context = await atStage('browser', () => launchBrowser(profilePath, headless));
 	const closeContext = () => { void context.close().catch(() => {}); };
 	signal.addEventListener('abort', closeContext, { once: true });
 	try {
@@ -374,7 +408,7 @@ async function runBrowser(command, profilePath, request, signal) {
 			if (observed) authorization = observed;
 		});
 		const page = context.pages()[0] ?? await context.newPage();
-		await openTeamPage(page);
+		await atStage('team-page', () => openTeamPage(page));
 
 		const deadline = Date.now() + (headless ? 15_000 : 10 * MINUTE);
 		while (Date.now() < deadline) {
@@ -382,8 +416,8 @@ async function runBrowser(command, profilePath, request, signal) {
 			for (const candidate of pages) {
 				if (!(await accountVisible(candidate)) || !authorization) continue;
 				// The account can sign in through another tab and return to the homepage.
-				if (!isTeamPage(candidate)) await openTeamPage(candidate);
-				await waitForTeamEdit(candidate);
+				if (!isTeamPage(candidate)) await atStage('team-page', () => openTeamPage(candidate));
+				await atStage('team-access', () => waitForTeamEdit(candidate));
 				if (!headless) return { ok: true };
 				let nextRequestAt = 0;
 				const get = apiReader(async url => {
@@ -414,7 +448,7 @@ async function runBrowser(command, profilePath, request, signal) {
 			if (!pages.length) break;
 			await sleep(300, undefined, { signal });
 		}
-		throw new WorkerError('login_required');
+		throw new WorkerError('login_required', undefined, { stage: 'session' });
 	} finally {
 		signal.removeEventListener('abort', closeContext);
 		await context.close().catch(() => {});
@@ -464,7 +498,7 @@ async function runWorker([command, profilePath], input, output) {
 		const failure = abort.signal.aborted && !(error instanceof WorkerError && error.code === 'schema')
 			? abort.signal.reason
 			: error instanceof WorkerError ? error : new WorkerError('network');
-		result = { ok: false, code: failure.code, message: failure.message };
+		result = { ok: false, code: failure.code, message: failure.message, diagnostic: diagnostic(failure) };
 	} finally {
 		lines.close();
 		input.pause();

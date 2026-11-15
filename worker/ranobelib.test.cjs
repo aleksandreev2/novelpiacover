@@ -150,6 +150,44 @@ test('flags a title with a different team on a separate branch', async () => {
 	assert.equal(observation.shared, true);
 });
 
+test('reports why a title has no schedule and which stage failed', async () => {
+	const { get } = fixture({ chapters: { 11: records([chapter(101, [6, later])]) } });
+	const { items: [{ observation }] } = await scanTeam(get, { known: [], force: false }, now);
+	assert.equal(observation.state, 'unknown');
+	assert.equal(observation.diagnostic.stage, 'chapters');
+	assert.equal(observation.diagnostic.code, 'schema');
+	assert.equal(observation.diagnostic.titleId, 11);
+	assert.match(observation.diagnostic.message, /неизвестная ветка/);
+	assert.equal(observation.scheduled, undefined);
+});
+
+test('identifies the catalog filter and page when pagination is incomplete', async () => {
+	const { get } = fixture({
+		ongoing: { 1: listing([title(11)], 1, 2), 2: records([]) },
+	});
+	await assert.rejects(scanTeam(get, { known: [], force: false }, now), error => {
+		assert.equal(error.code, 'schema');
+		assert.equal(error.context.stage, 'catalog-ongoing');
+		assert.equal(error.context.page, 2);
+		assert.match(error.message, /номер страницы/);
+		return true;
+	});
+});
+
+test('returns the HTTP code in a title diagnosis without copying a response body', async () => {
+	const { get } = fixture();
+	const read = apiReader(async () => ({
+		status: () => 404,
+		dispose: async () => {},
+		json: () => assert.fail('A failure body must not be read'),
+	}));
+	const inaccessible = url => url.pathname.startsWith('/api/branches/') ? read(url) : get(url);
+	const { items: [{ observation }] } = await scanTeam(inaccessible, { known: [], force: false }, now);
+	assert.equal(observation.diagnostic.stage, 'branches');
+	assert.equal(observation.diagnostic.httpStatus, 404);
+	assert.match(observation.diagnostic.message, /HTTP 404/);
+});
+
 test('counts team chapters published without a separate branch and excludes other teams', async () => {
 	const ours = { id: 11969 };
 	const other = { id: 10 };

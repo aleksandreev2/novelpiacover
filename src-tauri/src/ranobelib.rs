@@ -41,6 +41,54 @@ enum ObservationState {
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct Diagnostic {
+    stage: String,
+    code: String,
+    message: String,
+    http_status: Option<u16>,
+    title_id: Option<u64>,
+    page: Option<u32>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Attempt {
+    operation: Operation,
+    started_at: DateTime<Utc>,
+    finished_at: DateTime<Utc>,
+    diagnostic: Option<Diagnostic>,
+    counts: Option<ScanCounts>,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScanCounts {
+    completed: usize,
+    known: usize,
+    unknown: usize,
+    not_due: usize,
+}
+
+impl ScanCounts {
+    fn for_scan(scan: &Scan) -> Self {
+        let mut counts = Self::default();
+        for item in &scan.items {
+            if item.status == Status::Completed {
+                counts.completed += 1;
+            } else {
+                match item.observation.as_ref().map(|value| value.state) {
+                    Some(ObservationState::Known) => counts.known += 1,
+                    Some(ObservationState::Unknown) => counts.unknown += 1,
+                    None => counts.not_due += 1,
+                }
+            }
+        }
+        counts
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct Observation {
     state: ObservationState,
     scheduled: Option<u32>,
@@ -49,6 +97,7 @@ struct Observation {
     next_check_at: DateTime<Utc>,
     shared: Option<bool>,
     message: Option<String>,
+    diagnostic: Option<Diagnostic>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -81,6 +130,7 @@ struct Profile {
     next_scan_at: Option<DateTime<Utc>>,
     titles: Vec<Title>,
     final_loaded: BTreeSet<u64>,
+    last_attempt: Option<Attempt>,
 }
 
 impl Profile {
@@ -126,7 +176,7 @@ impl Profile {
     }
 }
 
-#[derive(Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Operation {
     Login,
@@ -160,6 +210,7 @@ struct Scan {
 struct State {
     profile: Profile,
     busy: Option<Operation>,
+    started_at: Option<DateTime<Utc>>,
     error: Option<String>,
 }
 
@@ -212,6 +263,8 @@ impl RanobeLib {
             "enabled": profile.enabled,
             "connected": profile.connected,
             "busy": state.busy,
+            "startedAt": state.started_at,
+            "lastAttempt": profile.last_attempt,
             "lastScanAt": profile.last_scan_at,
             "nextScanAt": if profile.enabled && profile.connected { profile.next_scan_at } else { None },
             "error": state.error,
@@ -284,6 +337,7 @@ impl RanobeLib {
             bail!("Сначала войдите в RanobeLIB.");
         }
         state.busy = Some(operation);
+        state.started_at = Some(Utc::now());
         state.error = None;
         Ok(true)
     }
@@ -295,17 +349,23 @@ impl RanobeLib {
                 "id": title.id,
                 "status": title.status,
                 "checkedAt": title.observation.as_ref().map(|observation| observation.checked_at),
-                "nextCheckAt": title.observation.as_ref().map(|observation| observation.next_check_at),
+                "nextCheckAt": title.observation.as_ref()
+                    .filter(|observation| observation.state == ObservationState::Known || observation.diagnostic.is_some())
+                    .map(|observation| observation.next_check_at),
             })).collect();
             json!({ "known": known, "force": force })
         };
         let result = invoke_worker(operation, &self.browser_profile, &input, stopping);
         let mut state = self.state.lock().unwrap();
         state.busy = None;
+        let finished_at = Utc::now();
+        let started_at = state.started_at.take().unwrap_or(finished_at);
         if stopping.load(Ordering::Acquire) {
             return;
         }
         let mut profile = state.profile.clone();
+        let mut diagnostic = None;
+        let mut counts = None;
         let error = match result {
             Ok(reply) if reply["ok"] == true => {
                 if operation == Operation::Login {
@@ -315,13 +375,19 @@ impl RanobeLib {
                 } else {
                     serde_json::from_value::<Scan>(reply)
                         .context("Не удалось прочитать результаты проверки RanobeLIB.")
-                        .and_then(|scan| profile.apply_scan(scan))
+                        .and_then(|scan| {
+                            let summary = ScanCounts::for_scan(&scan);
+                            profile.apply_scan(scan)?;
+                            counts = Some(summary);
+                            Ok(())
+                        })
                         .err()
                         .map(|error| error.to_string())
                 }
             }
             Ok(reply) => {
                 let code = reply["code"].as_str().unwrap_or_default();
+                diagnostic = serde_json::from_value(reply["diagnostic"].clone()).ok();
                 if matches!(code, "login_required" | "team_access") {
                     profile.connected = false;
                 }
@@ -345,6 +411,23 @@ impl RanobeLib {
             let retry = Utc::now() + INTERVAL;
             profile.next_scan_at = Some(profile.next_scan_at.map_or(retry, |next| next.max(retry)));
         }
+        let attempt = Attempt {
+            operation,
+            started_at,
+            finished_at,
+            diagnostic: diagnostic.or_else(|| {
+                error.as_ref().map(|message| Diagnostic {
+                    stage: "app".into(),
+                    code: "app_error".into(),
+                    message: message.clone(),
+                    http_status: None,
+                    title_id: None,
+                    page: None,
+                })
+            }),
+            counts,
+        };
+        profile.last_attempt = Some(attempt.clone());
         let next_scan = profile.next_scan_at;
         state.error = self
             .save(&mut state, profile)
@@ -352,6 +435,7 @@ impl RanobeLib {
             .map(|error| {
                 // Keep the in-process backoff even when the settings file is unavailable.
                 state.profile.next_scan_at = next_scan;
+                state.profile.last_attempt = Some(attempt);
                 error.to_string()
             })
             .or(error);
@@ -528,6 +612,7 @@ mod tests {
             next_check_at: now + TimeDelta::minutes(3),
             shared: Some(false),
             message: None,
+            diagnostic: None,
         };
         let mut profile = Profile::default();
         for (item, expected) in [

@@ -183,6 +183,15 @@
             <p class="field-help">Приложение читает данные RanobeLIB. Отметки о финальных главах хранятся на этом компьютере.</p>
           </div>
           <p id="ranobe-error" class="error-box" role="alert" hidden></p>
+          <details id="ranobe-diagnostics" class="ranobe-diagnostics">
+            <summary>Диагностика проверки</summary>
+            <div class="ranobe-report" id="ranobe-report" hidden>
+              <label class="sr-only" for="ranobe-report-text">Отчёт RanobeLIB</label>
+              <textarea id="ranobe-report-text" rows="7" readonly spellcheck="false"></textarea>
+              <button type="button" id="ranobe-copy-report">Скопировать отчёт</button>
+            </div>
+            <p id="ranobe-report-empty" class="muted">Запустите проверку, чтобы получить отчёт.</p>
+          </details>
           <div id="ranobe-catalogue" hidden>
             <div class="ranobe-catalogue-heading">
               <h2>Проекты команды</h2>

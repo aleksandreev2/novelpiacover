@@ -412,6 +412,63 @@ function renderRanobeTime(el, value, placeholder = "Ещё не было") {
     el.removeAttribute("title");
   }
 }
+const ranobeStages = {
+  "app": "Приложение",
+  "worker": "Помощник RanobeLIB",
+  "browser": "Запуск браузера",
+  "team-page": "Страница команды",
+  "session": "Авторизация",
+  "team-access": "Доступ к команде",
+  "catalog-ongoing": "Каталог активных переводов",
+  "catalog-completed": "Каталог завершённых переводов",
+  "branches": "Список веток",
+  "chapters": "Список глав",
+  "queue": "Очередь проверки",
+};
+function ranobeDiagnosticText(diagnostic, includeCode = false) {
+  const context = [ranobeStages[diagnostic.stage] ?? "Проверка"];
+  if (diagnostic.page > 1) context.push(`страница ${diagnostic.page}`);
+  if (diagnostic.httpStatus && !diagnostic.message.includes(`HTTP ${diagnostic.httpStatus}`))
+    context.push(`HTTP ${diagnostic.httpStatus}`);
+  if (includeCode) context.push(diagnostic.code);
+  return context.join(", ") + " — " + diagnostic.message;
+}
+function renderRanobeReport(ranobe) {
+  if (!$("ranobe-diagnostics").open) return;
+  const field = $("ranobe-report-text");
+  const { lastAttempt: attempt, busy, startedAt } = ranobe ?? {};
+  $("ranobe-report").hidden = !attempt && !startedAt;
+  $("ranobe-report-empty").hidden = !!attempt || !!startedAt;
+  if (!attempt && !startedAt) return;
+  const lines = [`RanobeLIB · Novelpia Cover Archive ${state.appVersion}`];
+  if (busy && startedAt) lines.push(`Сейчас выполняется ${busy === "login" ? "вход" : "проверка"}. Начало ${new Date(startedAt).toLocaleString("ru-RU")}.`);
+  if (attempt) {
+    const duration = Math.max(0, Math.round((Date.parse(attempt.finishedAt) - Date.parse(attempt.startedAt)) / 1000));
+    const operation = attempt.operation === "login" ? "Вход" : "Проверка";
+    lines.push(`${operation} · ${new Date(attempt.finishedAt).toLocaleString("ru-RU")} · ${duration} с`);
+    if (attempt.counts) {
+      const { known, unknown, notDue, completed } = attempt.counts;
+      lines.push(`Проверено расписаний ${known + unknown} · подтверждено ${known} · нет данных ${unknown}`,
+        `Ещё не пора обновлять ${notDue} · завершённых переводов ${completed}`);
+    }
+    if (attempt.diagnostic) {
+      const issue = attempt.diagnostic;
+      const title = issue.titleId ? `Тайтл #${issue.titleId} · ` : "";
+      lines.push(title + ranobeDiagnosticText(issue, true));
+    } else if (attempt.operation === "login") {
+      lines.push("Доступ к команде подтверждён.");
+    }
+  }
+  const issues = (ranobe?.titles ?? []).filter(({ observation }) => observation?.state === "unknown" && observation.diagnostic);
+  if (issues.length) {
+    lines.push("", "Тайтлы без подтверждённого расписания");
+    for (const { id, observation } of issues) {
+      lines.push(`#${id} · ${date(observation.checkedAt)} · ${ranobeDiagnosticText(observation.diagnostic, true)}`);
+    }
+  }
+  const report = lines.join("\n");
+  if (field.value !== report) field.value = report;
+}
 function createRanobeRow(id) {
   const row = item("li", "ranobe-row");
   const identity = item("div", "ranobe-identity");
@@ -467,7 +524,8 @@ function ranobeRow({ novel, known, ready, expired, connected }, row = createRano
   scheduled.classList.toggle("muted", !known);
   renderRanobeTime(row.querySelector(".ranobe-checked"), observation?.checkedAt);
   const reason = row.querySelector(".ranobe-schedule-note");
-  const message = connected && !known && (observation?.message || (expired ? "Проверка устарела" : ""));
+  const message = connected && !known && (observation?.diagnostic ? ranobeDiagnosticText(observation.diagnostic) :
+    observation?.message || (expired ? "Проверка устарела" : ""));
   reason.hidden = !message;
   setText(reason, message || "");
   const checkbox = row.querySelector("input");
@@ -502,6 +560,7 @@ function renderRanobe() {
   const error = ranobeError || ranobe?.error;
   $("ranobe-error").hidden = !error;
   setText($("ranobe-error"), error);
+  renderRanobeReport(ranobe);
   $("ranobe-scan-times").hidden = !ranobe?.lastScanAt && !ranobe?.nextScanAt;
   renderRanobeTime($("ranobe-last-scan"), ranobe?.lastScanAt);
   renderRanobeTime($("ranobe-next-scan"), enabled && connected && ranobe?.nextScanAt, "—");
@@ -823,6 +882,18 @@ $("ranobe-nav").onclick = () => {
 };
 $("ranobe-search").oninput = renderRanobe;
 $("ranobe-filter").onchange = renderRanobe;
+$("ranobe-diagnostics").ontoggle = () => renderRanobeReport(state?.ranobe);
+$("ranobe-copy-report").onclick = async () => {
+  const field = $("ranobe-report-text");
+  try {
+    await navigator.clipboard.writeText(field.value);
+    toast("Отчёт скопирован.");
+  } catch {
+    field.focus();
+    field.select();
+    toast("Отчёт выделен. Нажмите Ctrl+C.");
+  }
+};
 $("ranobe-login").onclick = () => runRanobeAction("ranobe-login");
 $("ranobe-check").onclick = () => runRanobeAction("ranobe-check", { force: false });
 $("ranobe-enabled").onchange = (event) => runRanobeAction("ranobe-settings", { enabled: event.target.checked });
